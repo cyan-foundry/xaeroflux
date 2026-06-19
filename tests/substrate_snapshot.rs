@@ -125,8 +125,8 @@ async fn snapshot_request_serve_round_trips() {
 
 /// X6 (data model) — the snapshot *store* round-trips through the public API without the network:
 /// preload via `update_from_event`, read back via `get_snapshot`, and confirm `handle_request`
-/// reports the correct item count. This is the honest, currently-working slice of X6; the QUIC
-/// transport is `#[ignore]`d above pending the `serve_snapshot` fix.
+/// reports the correct item count. Complements the over-the-wire QUIC round-trip in
+/// `snapshot_request_serve_round_trips` above by exercising the in-memory model directly.
 #[tokio::test]
 async fn snapshot_store_preload_and_serve_message() {
     let key = unique_key();
