@@ -61,6 +61,23 @@ only emitted on the discovery topic (never surfaced on a public field).
 - GATE: full `cargo test` ✅ (7 pass, 2 ignored, 0 fail), clippy **0 new warnings** (baseline 29).
   X3/X4 stable across 3 back-to-back runs.
 
-## PHASE 3 — reliability + red scaffolds (X7, X8)
-(in progress)
+## PHASE 3 — reliability + red scaffolds (X7, X8) ✅
+- `tests/substrate_reliability.rs`:
+  - `repeat_mesh_forms_is_stable` (X7) ✅ — forms + tears down the full mesh 15× in a loop; every
+    iteration converges within T. Teardown = dropping the iteration's nodes at end of loop body
+    (explicit `endpoint.close().await` was tried but cost ~35s/iter → dropped it; ~73s total now).
+  - `concurrent_meshes_do_not_interfere` ✅ — two independent meshes (unique keys) form concurrently
+    via `tokio::join!`; both converge, AND an event in mesh 1 reaches mesh 1's peer but never leaks
+    into mesh 2 (positive non-interference assertion via topic/provider isolation).
+- `scripts/reliability.sh` — runs the mesh + reliability suites N× (default 20), fails on first red.
+- `tests/substrate_swarm.rs`: `blob_ihave_whohas_negotiates`, `blob_fetched_from_two_providers`
+  both **#[ignore]** with precise reasons (iroh-blobs 0.97 present but not wired — no blobs ALPN on
+  the Router, no content-addressed store / IHave-WhoHas API). Honest red scaffolds for a future rung.
+- GATE: full `cargo test` ✅, clippy **0 new warnings** (baseline 29). Reliability suite ~73s.
+
+## Tallies
+- Green: X1, X2 (mesh); X3, X4 (discovery via raw-gossip injection); X6 data-model; X7 (×2 reliability).
+- Ignored (honest, precise reasons): X5 (departure not publicly observable), X6 QUIC round-trip
+  (serve/download stream mismatch), X8 ×2 (blobs not integrated).
+- `main` never touched. All work on `feat/bootstrap-tests` off `feat/bootstrap-wip`.
 </content>
