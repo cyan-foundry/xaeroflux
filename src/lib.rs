@@ -1074,3 +1074,4 @@ mod tests {
         assert!(!xf.node_id.is_empty());
     }
 }pub mod snapshot;
+pub mod swarm;
