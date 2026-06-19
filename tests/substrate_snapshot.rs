@@ -13,7 +13,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
-use iroh::endpoint::Connection;
+use iroh::endpoint::{Connection, SendStream};
 use support::{offline_endpoint, unique_key};
 use xaeroflux::snapshot::{SnapshotMessage, SnapshotProvider, SnapshotRequester, SNAPSHOT_ALPN};
 use xaeroflux::Event;
@@ -29,30 +29,29 @@ fn ev(payload: serde_json::Value) -> Event {
     }
 }
 
-/// Provider-side accept loop: read the group_id the requester sends, then serve via the public API.
-async fn read_requested_group(conn: &Connection) -> Result<String> {
-    let (_send, mut recv) = conn.accept_bi().await?;
+/// Provider-side accept loop: accept the bi-stream the requester opened, read the group_id it
+/// sends, and return the **send half of that same accepted stream** so the snapshot reply rides
+/// back on the stream the requester is reading from.
+async fn read_requested_group(conn: &Connection) -> Result<(SendStream, String)> {
+    let (send, mut recv) = conn.accept_bi().await?;
     let mut len_buf = [0u8; 4];
     recv.read_exact(&mut len_buf).await?;
     let n = u32::from_be_bytes(len_buf) as usize;
     let mut buf = vec![0u8; n];
     recv.read_exact(&mut buf).await?;
-    Ok(String::from_utf8_lossy(&buf).to_string())
+    Ok((send, String::from_utf8_lossy(&buf).to_string()))
 }
 
-/// X6 — full QUIC round-trip. **Currently #[ignore]d: genuine engine protocol mismatch.**
+/// X6 — full QUIC round-trip.
 ///
 /// `SnapshotRequester::download_snapshot` opens a bi-stream, writes the group_id, then reads the
-/// reply **on the recv half of that same stream**. But `SnapshotProvider::serve_snapshot` writes the
-/// snapshot on a *new, provider-initiated* `conn.open_bi()` stream (and never writes to the stream
-/// the requester opened), then returns — dropping the connection. The two halves never rendezvous,
-/// so the transfer fails fast with "connection lost" (observed empirically in 1.06s, not a timeout).
-/// The `xaeroflux_bootstrap` binary wires no snapshot accept loop, so this QUIC path is unexercised
-/// in production. Re-enable once `serve_snapshot` replies on the *accepted* stream (`accept_bi`)
-/// instead of opening its own. The in-memory snapshot model itself works — see
-/// `snapshot_store_preload_and_serve_message` below.
+/// reply **on the recv half of that same stream**. `SnapshotProvider::serve_snapshot` now replies
+/// on the send half of the *accepted* stream (the one `accept_bi()` produced for the requester's
+/// open), so the two halves rendezvous and the snapshot transfers. (Previously `serve_snapshot`
+/// replied on a fresh provider-initiated `conn.open_bi()` stream the requester never read, and the
+/// transfer failed fast with "connection lost".) The in-memory snapshot model is exercised
+/// separately by `snapshot_store_preload_and_serve_message` below.
 #[tokio::test]
-#[ignore = "engine: serve_snapshot replies on a fresh open_bi() stream while download_snapshot reads its own opened stream — they never rendezvous (connection lost). Fix serve to use the accepted stream."]
 async fn snapshot_request_serve_round_trips() {
     let key = unique_key();
     let provider_ep = offline_endpoint(&key, vec![SNAPSHOT_ALPN.to_vec()]).await;
@@ -95,11 +94,14 @@ async fn snapshot_request_serve_round_trips() {
             if conn.alpn() != SNAPSHOT_ALPN {
                 continue;
             }
-            let group_id = match read_requested_group(&conn).await {
+            let (send, group_id) = match read_requested_group(&conn).await {
                 Ok(g) => g,
                 Err(_) => continue,
             };
-            let _ = prov.serve_snapshot(conn, &group_id).await;
+            let _ = prov.serve_snapshot(send, &group_id).await;
+            // Keep the connection alive until the requester has read the reply and closed,
+            // so the finished stream's bytes are not lost to an eager connection drop.
+            conn.closed().await;
         }
     });
 

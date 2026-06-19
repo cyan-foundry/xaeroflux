@@ -17,7 +17,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use bytes::Bytes;
-use iroh::{endpoint::Connection, Endpoint, PublicKey};
+use iroh::{endpoint::SendStream, Endpoint, PublicKey};
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 
@@ -242,15 +242,20 @@ impl SnapshotProvider {
         }
     }
 
-    /// Serve snapshot over direct QUIC connection
-    pub async fn serve_snapshot(&self, conn: Connection, group_id: &str) -> Result<()> {
+    /// Serve snapshot over a direct QUIC connection.
+    ///
+    /// `send` is the send half of the bi-stream the requester opened — obtained by the
+    /// accept loop via `conn.accept_bi()` on the incoming request. We reply on *that*
+    /// accepted stream so the requester's matching `recv` half receives the bytes. (An
+    /// earlier version replied on a fresh `conn.open_bi()`; the requester never read that
+    /// stream, so the two halves never rendezvoused and the transfer failed "connection
+    /// lost".)
+    pub async fn serve_snapshot(&self, mut send: SendStream, group_id: &str) -> Result<()> {
         let snapshot = match self.get_snapshot(group_id).await {
             Some(s) => s,
             None => return Err(anyhow::anyhow!("No snapshot for group {}", group_id)),
         };
 
-        let (mut send, _recv) = conn.open_bi().await?;
-        
         // Serialize and send snapshot
         let data = serde_json::to_vec(&snapshot)?;
         let len = (data.len() as u32).to_be_bytes();
