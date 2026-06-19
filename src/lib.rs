@@ -20,7 +20,10 @@ use anyhow::Result;
 use bytes::Bytes;
 use futures::StreamExt;
 use iroh::{
-    discovery::{dns::DnsDiscovery, mdns::MdnsDiscovery, pkarr::PkarrPublisher},
+    discovery::{
+        dns::DnsDiscovery, mdns::MdnsDiscovery, pkarr::PkarrPublisher,
+        static_provider::StaticProvider,
+    },
     protocol::Router,
     Endpoint, PublicKey, RelayMap, RelayMode, RelayUrl, SecretKey,
 };
@@ -52,6 +55,12 @@ pub struct XaeroFluxConfig {
     pub bootstrap_peers: Vec<String>,
     pub use_n0_discovery: bool,
     pub use_mdns: bool,
+    /// Test/offline seam: when true, bind with `RelayMode::Disabled` (no relay contact at all).
+    /// Default `false` preserves production behavior (n0 / custom relay).
+    pub relay_disabled: bool,
+    /// Test/offline seam: optional `StaticProvider` for manual, out-of-band address resolution
+    /// (loopback meshes with no n0 DNS, no mDNS multicast, no relay). Default `None`.
+    pub static_provider: Option<StaticProvider>,
 }
 
 impl Default for XaeroFluxConfig {
@@ -63,6 +72,8 @@ impl Default for XaeroFluxConfig {
             bootstrap_peers: vec![],
             use_n0_discovery: true,
             use_mdns: true,
+            relay_disabled: false,
+            static_provider: None,
         }
     }
 }
@@ -114,6 +125,21 @@ impl XaeroFluxBuilder {
         self
     }
 
+    /// Test/offline seam: bind with `RelayMode::Disabled` so the node never contacts any relay.
+    /// Additive and opt-in; the bootstrap binary does not call this (keeps `RelayMode::Default`).
+    pub fn disable_relay(mut self) -> Self {
+        self.config.relay_disabled = true;
+        self
+    }
+
+    /// Test/offline seam: install a shared `StaticProvider` as an extra discovery service so peers
+    /// can resolve each other's loopback addresses out-of-band. Additive and opt-in; behavior is
+    /// unchanged unless a provider is supplied.
+    pub fn static_provider(mut self, provider: StaticProvider) -> Self {
+        self.config.static_provider = Some(provider);
+        self
+    }
+
     pub async fn build(self) -> Result<XaeroFlux> {
         XaeroFlux::from_config(self.config).await
     }
@@ -131,6 +157,10 @@ pub struct XaeroFlux {
     pub event_rx: mpsc::UnboundedReceiver<Event>,
     pub discovery_key: String,
     pub node_id: String,
+    /// The bound iroh endpoint (clone of the one driven by the `NetworkActor`). Exposed so test
+    /// harnesses can read this node's `EndpointAddr` and feed it to a shared `StaticProvider` for
+    /// offline loopback addressing. Additive; the bootstrap binary ignores it.
+    pub endpoint: Endpoint,
 }
 
 impl XaeroFlux {
@@ -214,6 +244,7 @@ impl XaeroFlux {
             sync_event_tx,
         )
             .await?;
+        let endpoint = network_actor.endpoint.clone();
         tokio::spawn(network_actor.run());
 
         Ok(Self {
@@ -221,6 +252,7 @@ impl XaeroFlux {
             event_rx: sync_event_rx,
             discovery_key: config.discovery_key,
             node_id,
+            endpoint,
         })
     }
 }
@@ -487,7 +519,10 @@ impl NetworkActor {
         inbound_tx: mpsc::UnboundedSender<Event>,
     ) -> Result<Self> {
         // Configure relay mode
-        let relay_mode = if let Some(ref url_str) = config.relay_url {
+        let relay_mode = if config.relay_disabled {
+            tracing::info!("🚫 Relay disabled (offline mode)");
+            RelayMode::Disabled
+        } else if let Some(ref url_str) = config.relay_url {
             match RelayUrl::from_str(url_str) {
                 Ok(url) => {
                     tracing::info!("🌐 Using custom relay: {}", url);
@@ -517,6 +552,11 @@ impl NetworkActor {
 
         if config.use_mdns {
             builder = builder.discovery(MdnsDiscovery::builder());
+        }
+
+        // Test/offline seam: extra static discovery for out-of-band loopback addressing.
+        if let Some(ref provider) = config.static_provider {
+            builder = builder.discovery(provider.clone());
         }
 
         let endpoint = builder.bind().await?;
