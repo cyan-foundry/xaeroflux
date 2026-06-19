@@ -36,6 +36,31 @@ Branch: `feat/bootstrap-tests` off `feat/bootstrap-wip`. Never main.
 - GATE: `cargo build` ✅, full `cargo test` ✅ (4 pass, 0 new ignored), clippy **0 new warnings**
   (baseline 29 pre-existing, 0 in my files). Stable across 3 back-to-back runs (~9s each).
 
-## PHASE 2 — discovery + snapshot (X3, X4, X5, X6)
+## PHASE 2 — discovery + snapshot (X3, X4, X5, X6) ✅
+Added a raw co-resident gossip peer to the harness (`RawGossip` + `topic_id`/`discovery_topic`/
+`group_topic`/`pubkey`/`offline_endpoint`/`mesh_provider`) — needed because `groups_exchange` and
+group-topic events cannot be sent through the public `XaeroFlux` API, and `peer_introduction` is
+only emitted on the discovery topic (never surfaced on a public field).
+
+- `group_topic_auto_subscribe_on_announce` (X3) ✅ — raw peer announces group "g1" via
+  `groups_exchange`; bootstrap auto-subscribes to `cyan/group/g1` and relays a group event to its
+  own `event_rx` with `source == "group/g1"`. Oracle = bootstrap's `event_rx`.
+- `peer_introduction_lists_both_peers` (X4) ✅ — observer announces two peer ids for "g1"; bootstrap
+  broadcasts a `peer_introduction` on the discovery topic listing both; observer reads it back.
+- `peer_departure_marks_offline` (X5) **#[ignore]** — honest finding: departure is not observable via
+  any public oracle in-process. `mark_offline` keys on the gossip **neighbor** id, not the
+  `groups_exchange` node_id that populates rosters; `PeerTracker` is private; post-departure
+  `peer_introduction` only re-fires while a group still has >1 peer. Reason recorded in the test.
+- `snapshot_request_serve_round_trips` (X6, QUIC) **#[ignore]** — genuine engine bug, confirmed
+  empirically ("connection lost" in 1.06s, not a timeout): `serve_snapshot` replies on a fresh
+  provider-initiated `open_bi()` stream while `download_snapshot` reads the stream **it** opened —
+  the two never rendezvous. The bootstrap binary wires no snapshot accept loop, so this path is
+  unexercised in production. Precise reason recorded in the test's `#[ignore]`.
+- `snapshot_store_preload_and_serve_message` (X6 data model) ✅ — the working slice: preload via
+  `update_from_event`, read back via `get_snapshot`, and `handle_request` reports `item_count == 2`.
+- GATE: full `cargo test` ✅ (7 pass, 2 ignored, 0 fail), clippy **0 new warnings** (baseline 29).
+  X3/X4 stable across 3 back-to-back runs.
+
+## PHASE 3 — reliability + red scaffolds (X7, X8)
 (in progress)
 </content>

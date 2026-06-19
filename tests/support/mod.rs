@@ -22,7 +22,11 @@ use std::time::Duration;
 
 use anyhow::{anyhow, Result};
 use iroh::discovery::static_provider::StaticProvider;
-use iroh::Endpoint;
+use iroh::protocol::Router;
+use iroh::{Endpoint, PublicKey};
+use iroh_gossip::api::{GossipReceiver, GossipSender};
+use iroh_gossip::proto::TopicId;
+use iroh_gossip::Gossip;
 use tokio::sync::mpsc::UnboundedReceiver;
 use xaeroflux::{generate_event_id, Event, XaeroFlux};
 
@@ -103,6 +107,112 @@ pub async fn spawn_local_node(name: &str, key: &str, bootstrap: &[String]) -> Xa
     provider.add_endpoint_info(addr);
 
     xf
+}
+
+/// The shared `StaticProvider` for a mesh/key — for tests that build their own raw peers and need
+/// to register addresses into the same out-of-band addressing namespace as the `XaeroFlux` nodes.
+pub fn mesh_provider(key: &str) -> StaticProvider {
+    provider_for(key)
+}
+
+/// Build a raw, offline iroh `Endpoint` joined to the mesh's shared `StaticProvider`, advertising
+/// the given ALPNs, and register its dialable address. For tests that must act as a raw QUIC /
+/// gossip peer alongside `XaeroFlux` nodes (snapshot transfer, discovery-topic injection).
+pub async fn offline_endpoint(key: &str, alpns: Vec<Vec<u8>>) -> Endpoint {
+    let provider = provider_for(key);
+    let endpoint = Endpoint::builder()
+        .alpns(alpns)
+        .relay_mode(iroh::RelayMode::Disabled)
+        .discovery(provider.clone())
+        .bind()
+        .await
+        .expect("bind offline raw endpoint");
+    let addr = dialable_addr(&endpoint)
+        .await
+        .expect("resolve raw endpoint dialable address");
+    provider.add_endpoint_info(addr);
+    endpoint
+}
+
+/// Derive a gossip `TopicId` exactly as the engine does: `blake3(label)[..32]`.
+pub fn topic_id(label: &str) -> TopicId {
+    let hash = blake3::hash(label.as_bytes());
+    let bytes: [u8; 32] = hash.as_bytes()[..32]
+        .try_into()
+        .expect("blake3 digest is 32 bytes");
+    TopicId::from_bytes(bytes)
+}
+
+/// The engine's discovery topic for a discovery key (`cyan/discovery/{key}`).
+pub fn discovery_topic(key: &str) -> TopicId {
+    topic_id(&format!("cyan/discovery/{key}"))
+}
+
+/// The engine's per-group topic (`cyan/group/{gid}`).
+pub fn group_topic(gid: &str) -> TopicId {
+    topic_id(&format!("cyan/group/{gid}"))
+}
+
+/// Parse a node_id string into an iroh `PublicKey` (the engine's `EndpointId`).
+pub fn pubkey(node_id: &str) -> PublicKey {
+    node_id.parse().expect("node_id should parse as a PublicKey")
+}
+
+/// A raw, offline iroh-gossip peer — used to inject discovery-topic control messages
+/// (`groups_exchange`) and group-topic events that the public `XaeroFlux` API cannot send, and to
+/// observe broadcasts (`peer_introduction`) that the engine surfaces only on the discovery topic.
+/// Mirrors the engine's own gossip wiring (iroh_gossip::ALPN + Router + Gossip).
+pub struct RawGossip {
+    pub endpoint: Endpoint,
+    gossip: std::sync::Arc<Gossip>,
+    _router: Router,
+}
+
+impl RawGossip {
+    /// Spawn a raw gossip peer wired into the mesh's shared `StaticProvider`, fully offline.
+    pub async fn spawn(key: &str) -> Self {
+        let provider = provider_for(key);
+        let endpoint = Endpoint::builder()
+            .alpns(vec![iroh_gossip::ALPN.to_vec()])
+            .relay_mode(iroh::RelayMode::Disabled)
+            .discovery(provider.clone())
+            .bind()
+            .await
+            .expect("bind raw gossip endpoint");
+        let addr = dialable_addr(&endpoint)
+            .await
+            .expect("resolve raw gossip dialable address");
+        provider.add_endpoint_info(addr);
+
+        let gossip = std::sync::Arc::new(Gossip::builder().spawn(endpoint.clone()));
+        let router = Router::builder(endpoint.clone())
+            .accept(iroh_gossip::ALPN, gossip.clone())
+            .spawn();
+
+        Self {
+            endpoint,
+            gossip,
+            _router: router,
+        }
+    }
+
+    pub fn node_id(&self) -> String {
+        self.endpoint.id().to_string()
+    }
+
+    /// Subscribe to a gossip topic, bootstrapping from `peers`. Returns the split sender/receiver.
+    pub async fn subscribe(
+        &self,
+        topic: TopicId,
+        peers: Vec<PublicKey>,
+    ) -> (GossipSender, GossipReceiver) {
+        let topic = self
+            .gossip
+            .subscribe(topic, peers)
+            .await
+            .expect("subscribe to gossip topic");
+        topic.split()
+    }
 }
 
 fn sanitize(s: &str) -> String {
