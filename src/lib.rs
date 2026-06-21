@@ -161,6 +161,10 @@ pub struct XaeroFlux {
     /// harnesses can read this node's `EndpointAddr` and feed it to a shared `StaticProvider` for
     /// offline loopback addressing. Additive; the bootstrap binary ignores it.
     pub endpoint: Endpoint,
+    /// This node's secret key, retained so it can sign a self-published rendezvous config
+    /// (see [`XaeroFlux::signed_rendezvous_config`]). Private — never exposed to callers; the
+    /// only thing it can do from outside is sign the rendezvous config the node already advertises.
+    secret_key: SecretKey,
 }
 
 impl XaeroFlux {
@@ -234,7 +238,9 @@ impl XaeroFlux {
         let storage_actor = StorageActor::new(db.clone(), app_event_rx, network_event_tx);
         tokio::spawn(storage_actor.run());
 
-        // Start network actor
+        // Start network actor. Clone the secret key first so the node can later sign its own
+        // self-published rendezvous config without exposing the key to the network actor's owner.
+        let signing_key = secret_key.clone();
         let network_actor = NetworkActor::new(
             secret_key,
             config.clone(),
@@ -253,7 +259,40 @@ impl XaeroFlux {
             discovery_key: config.discovery_key,
             node_id,
             endpoint,
+            secret_key: signing_key,
         })
+    }
+
+    /// Build a **signed rendezvous config** advertising this node as a bootstrap peer
+    /// (SUPER_PEER_COMPLETION_SPEC §5). Apps fetch it, verify the signature against the
+    /// embedded `signer` (== this node's `node_id`), and pin the `node_id` — so they
+    /// discover the bootstrap dynamically instead of hardcoding it.
+    ///
+    /// Pulls `node_id` + `discovery_key` from this node, its dialable direct addresses
+    /// from the bound endpoint, and signs with this node's own key. `relay_url` is the
+    /// configured relay (falls back to a relay observed on the endpoint address); `ts`
+    /// is the publish timestamp (caller-provided so this stays pure/testable).
+    pub fn signed_rendezvous_config(
+        &self,
+        env: &str,
+        relay_url: Option<String>,
+        ts: u64,
+    ) -> Result<rendezvous::SignedRendezvousConfig> {
+        let addr = self.endpoint.addr();
+        let direct: Vec<String> = addr.ip_addrs().map(|a| a.to_string()).collect();
+        let relay = relay_url.or_else(|| addr.relay_urls().next().map(|u| u.to_string()));
+
+        let config = rendezvous::RendezvousConfig {
+            env: env.to_string(),
+            discovery_key: self.discovery_key.clone(),
+            bootstrap: rendezvous::BootstrapInfo {
+                node_id: self.node_id.clone(),
+                addr: direct,
+            },
+            relay_url: relay,
+            ts,
+        };
+        rendezvous::sign_config(config, &self.secret_key)
     }
 }
 
@@ -1073,5 +1112,6 @@ mod tests {
             .expect("failed to create XaeroFlux with custom relay");
         assert!(!xf.node_id.is_empty());
     }
-}pub mod snapshot;
+}pub mod rendezvous;
+pub mod snapshot;
 pub mod swarm;

@@ -18,6 +18,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
+use xaeroflux::rendezvous::{FileSink, publish_signed};
 use xaeroflux::{Event, XaeroFlux};
 
 use iggy::client::{Client, ConsumerGroupClient, MessageClient, StreamClient, TopicClient};
@@ -591,6 +592,25 @@ impl IggyConnection {
 }
 
 // ============================================================================
+// Rendezvous self-publish (SUPER_PEER_COMPLETION_SPEC §5)
+// ============================================================================
+
+/// Sign and publish this node's rendezvous config to the file sink at `path`.
+///
+/// Behavior-preserving: callers treat a failure as non-fatal — the bootstrap keeps
+/// serving discovery/gossip/snapshots even if the config can't be written.
+fn publish_rendezvous(
+    xf: &XaeroFlux,
+    env_label: &str,
+    relay_url: Option<String>,
+    path: &str,
+) -> anyhow::Result<()> {
+    let signed = xf.signed_rendezvous_config(env_label, relay_url, current_ts())?;
+    let sink = FileSink::new(path);
+    publish_signed(&sink, &signed)
+}
+
+// ============================================================================
 // Main
 // ============================================================================
 
@@ -613,6 +633,18 @@ async fn main() -> anyhow::Result<()> {
     let no_n0 = env::var("NO_N0").map(|v| v == "1").unwrap_or(false);
     let iggy_addr = env::var("IGGY_ADDR").unwrap_or_else(|_| "127.0.0.1:8090".to_string());
     let iggy_enabled = env::var("IGGY_ENABLED").map(|v| v != "0").unwrap_or(true);
+    // Rendezvous self-publish (SUPER_PEER_COMPLETION_SPEC §5): on start, write a signed config
+    // advertising this node so apps discover it instead of hardcoding its node_id. The deploy
+    // uploads/serves RENDEZVOUS_PATH at the well-known URL. Defaults to <db parent>/rendezvous.json.
+    let rendezvous_env = env::var("XAEROFLUX_ENV").unwrap_or_else(|_| "dev".to_string());
+    let rendezvous_path = env::var("RENDEZVOUS_PATH").unwrap_or_else(|_| {
+        std::path::Path::new(&db_path)
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("."))
+            .join("rendezvous.json")
+            .to_string_lossy()
+            .to_string()
+    });
 
     println!();
     println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
@@ -637,8 +669,8 @@ async fn main() -> anyhow::Result<()> {
         .discovery_key(&discovery_key)
         .db_path(&db_path);
 
-    if let Some(url) = relay_url {
-        builder = builder.relay_url(url);
+    if let Some(ref url) = relay_url {
+        builder = builder.relay_url(url.clone());
     }
 
     if no_n0 {
@@ -652,6 +684,22 @@ async fn main() -> anyhow::Result<()> {
     println!("  NODE ID: {}", xf.node_id);
     println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
     println!();
+
+    // Self-publish the signed rendezvous config (additive; publish-on-start only). Re-running on
+    // every (re)start means a fresh node.key / redeploy is reflected automatically — no per-deploy
+    // retune. A failure here must NOT take the bootstrap down; log and keep serving discovery.
+    match publish_rendezvous(&xf, &rendezvous_env, relay_url.clone(), &rendezvous_path) {
+        Ok(()) => {
+            println!("📡 Published signed rendezvous config → {}", rendezvous_path);
+            println!("   env={} discovery_key={} node_id={}", rendezvous_env, discovery_key, xf.node_id);
+            println!();
+        }
+        Err(e) => {
+            tracing::warn!("rendezvous publish failed (continuing): {}", e);
+            println!("⚠️  Rendezvous publish failed (continuing): {}", e);
+            println!();
+        }
+    }
 
     let iggy = Arc::new(RwLock::new(IggyConnection::new(iggy_addr.clone(), iggy_enabled)));
     let tracker = Arc::new(RwLock::new(ScopeTracker::new()));
