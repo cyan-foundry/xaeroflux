@@ -44,3 +44,9 @@ cargo clippy --all-targets -- -D warnings
 `src/lib.rs` (the `XaeroFlux` builder/struct, `NetworkActor`, `PeerTracker`,
 `StorageActor`), `src/snapshot.rs` (`SnapshotProvider`/`SnapshotRequester`,
 `GroupSnapshot`), `src/bin/xaeroflux_bootstrap.rs` (the deployed bootstrap peer).
+
+## Simplicity (standing rule)
+We are a startup; engineers joining must read this code easily. Favor the simplest thing
+that works: one path not two; concrete types or `Arc<dyn Trait>` over generic soup; clear
+names; flat layout. Delete dead code rather than abstracting it. A new hire should be able
+to trace any feature end-to-end through a small handful of files.
