@@ -20,7 +20,10 @@ use anyhow::Result;
 use bytes::Bytes;
 use futures::StreamExt;
 use iroh::{
-    discovery::{dns::DnsDiscovery, mdns::MdnsDiscovery, pkarr::PkarrPublisher},
+    discovery::{
+        dns::DnsDiscovery, mdns::MdnsDiscovery, pkarr::PkarrPublisher,
+        static_provider::StaticProvider,
+    },
     protocol::Router,
     Endpoint, PublicKey, RelayMap, RelayMode, RelayUrl, SecretKey,
 };
@@ -52,6 +55,12 @@ pub struct XaeroFluxConfig {
     pub bootstrap_peers: Vec<String>,
     pub use_n0_discovery: bool,
     pub use_mdns: bool,
+    /// Test/offline seam: when true, bind with `RelayMode::Disabled` (no relay contact at all).
+    /// Default `false` preserves production behavior (n0 / custom relay).
+    pub relay_disabled: bool,
+    /// Test/offline seam: optional `StaticProvider` for manual, out-of-band address resolution
+    /// (loopback meshes with no n0 DNS, no mDNS multicast, no relay). Default `None`.
+    pub static_provider: Option<StaticProvider>,
 }
 
 impl Default for XaeroFluxConfig {
@@ -63,6 +72,8 @@ impl Default for XaeroFluxConfig {
             bootstrap_peers: vec![],
             use_n0_discovery: true,
             use_mdns: true,
+            relay_disabled: false,
+            static_provider: None,
         }
     }
 }
@@ -114,6 +125,21 @@ impl XaeroFluxBuilder {
         self
     }
 
+    /// Test/offline seam: bind with `RelayMode::Disabled` so the node never contacts any relay.
+    /// Additive and opt-in; the bootstrap binary does not call this (keeps `RelayMode::Default`).
+    pub fn disable_relay(mut self) -> Self {
+        self.config.relay_disabled = true;
+        self
+    }
+
+    /// Test/offline seam: install a shared `StaticProvider` as an extra discovery service so peers
+    /// can resolve each other's loopback addresses out-of-band. Additive and opt-in; behavior is
+    /// unchanged unless a provider is supplied.
+    pub fn static_provider(mut self, provider: StaticProvider) -> Self {
+        self.config.static_provider = Some(provider);
+        self
+    }
+
     pub async fn build(self) -> Result<XaeroFlux> {
         XaeroFlux::from_config(self.config).await
     }
@@ -131,6 +157,14 @@ pub struct XaeroFlux {
     pub event_rx: mpsc::UnboundedReceiver<Event>,
     pub discovery_key: String,
     pub node_id: String,
+    /// The bound iroh endpoint (clone of the one driven by the `NetworkActor`). Exposed so test
+    /// harnesses can read this node's `EndpointAddr` and feed it to a shared `StaticProvider` for
+    /// offline loopback addressing. Additive; the bootstrap binary ignores it.
+    pub endpoint: Endpoint,
+    /// This node's secret key, retained so it can sign a self-published rendezvous config
+    /// (see [`XaeroFlux::signed_rendezvous_config`]). Private — never exposed to callers; the
+    /// only thing it can do from outside is sign the rendezvous config the node already advertises.
+    secret_key: SecretKey,
 }
 
 impl XaeroFlux {
@@ -204,7 +238,9 @@ impl XaeroFlux {
         let storage_actor = StorageActor::new(db.clone(), app_event_rx, network_event_tx);
         tokio::spawn(storage_actor.run());
 
-        // Start network actor
+        // Start network actor. Clone the secret key first so the node can later sign its own
+        // self-published rendezvous config without exposing the key to the network actor's owner.
+        let signing_key = secret_key.clone();
         let network_actor = NetworkActor::new(
             secret_key,
             config.clone(),
@@ -214,6 +250,7 @@ impl XaeroFlux {
             sync_event_tx,
         )
             .await?;
+        let endpoint = network_actor.endpoint.clone();
         tokio::spawn(network_actor.run());
 
         Ok(Self {
@@ -221,7 +258,41 @@ impl XaeroFlux {
             event_rx: sync_event_rx,
             discovery_key: config.discovery_key,
             node_id,
+            endpoint,
+            secret_key: signing_key,
         })
+    }
+
+    /// Build a **signed rendezvous config** advertising this node as a bootstrap peer
+    /// (SUPER_PEER_COMPLETION_SPEC §5). Apps fetch it, verify the signature against the
+    /// embedded `signer` (== this node's `node_id`), and pin the `node_id` — so they
+    /// discover the bootstrap dynamically instead of hardcoding it.
+    ///
+    /// Pulls `node_id` + `discovery_key` from this node, its dialable direct addresses
+    /// from the bound endpoint, and signs with this node's own key. `relay_url` is the
+    /// configured relay (falls back to a relay observed on the endpoint address); `ts`
+    /// is the publish timestamp (caller-provided so this stays pure/testable).
+    pub fn signed_rendezvous_config(
+        &self,
+        env: &str,
+        relay_url: Option<String>,
+        ts: u64,
+    ) -> Result<rendezvous::SignedRendezvousConfig> {
+        let addr = self.endpoint.addr();
+        let direct: Vec<String> = addr.ip_addrs().map(|a| a.to_string()).collect();
+        let relay = relay_url.or_else(|| addr.relay_urls().next().map(|u| u.to_string()));
+
+        let config = rendezvous::RendezvousConfig {
+            env: env.to_string(),
+            discovery_key: self.discovery_key.clone(),
+            bootstrap: rendezvous::BootstrapInfo {
+                node_id: self.node_id.clone(),
+                addr: direct,
+            },
+            relay_url: relay,
+            ts,
+        };
+        rendezvous::sign_config(config, &self.secret_key)
     }
 }
 
@@ -487,7 +558,10 @@ impl NetworkActor {
         inbound_tx: mpsc::UnboundedSender<Event>,
     ) -> Result<Self> {
         // Configure relay mode
-        let relay_mode = if let Some(ref url_str) = config.relay_url {
+        let relay_mode = if config.relay_disabled {
+            tracing::info!("🚫 Relay disabled (offline mode)");
+            RelayMode::Disabled
+        } else if let Some(ref url_str) = config.relay_url {
             match RelayUrl::from_str(url_str) {
                 Ok(url) => {
                     tracing::info!("🌐 Using custom relay: {}", url);
@@ -517,6 +591,11 @@ impl NetworkActor {
 
         if config.use_mdns {
             builder = builder.discovery(MdnsDiscovery::builder());
+        }
+
+        // Test/offline seam: extra static discovery for out-of-band loopback addressing.
+        if let Some(ref provider) = config.static_provider {
+            builder = builder.discovery(provider.clone());
         }
 
         let endpoint = builder.bind().await?;
@@ -587,12 +666,19 @@ impl NetworkActor {
         let peer_tracker_clone = peer_tracker.clone();
         let discovery_key_clone = config.discovery_key.clone();
         let endpoint_id_clone = endpoint_id;
+        let gossip_clone = gossip.clone();  // For dynamic group topic subscription
+        let inbound_tx_clone = inbound_tx.clone();  // For forwarding group events
 
         tokio::spawn(async move {
             tracing::info!("Peer discovery task started");
 
             let mut announce_interval = tokio::time::interval(Duration::from_secs(30));
             let mut prune_interval = tokio::time::interval(Duration::from_secs(300));
+
+            // Track which group topics we've subscribed to (for relaying)
+            // Store the senders so we can add peers via join_peers
+            let mut group_topic_senders: std::collections::HashMap<String, iroh_gossip::api::GossipSender> =
+                std::collections::HashMap::new();
 
             loop {
                 tokio::select! {
@@ -640,66 +726,199 @@ impl NetworkActor {
                     Some(event_result) = discovery_topic.next() => {
                         match event_result {
                             Ok(GossipEvent::Received(msg)) => {
-                                let sender_peer = msg.delivered_from;
-                                let sender_str = sender_peer.to_string();
-
                                 if let Ok(json) = serde_json::from_slice::<serde_json::Value>(&msg.content) {
                                     if let Some(msg_type) = json.get("msg_type").and_then(|v| v.as_str()) {
                                         if msg_type == "groups_exchange" {
-                                            let from_node = json.get("node_id")
-                                                .and_then(|v| v.as_str())
-                                                .unwrap_or("unknown");
+                                            // Use node_id from JSON payload (not delivered_from which may be relay)
+                                            let from_node = match json.get("node_id").and_then(|v| v.as_str()) {
+                                                Some(id) => id,
+                                                None => {
+                                                    tracing::warn!("groups_exchange missing node_id field!");
+                                                    continue;
+                                                }
+                                            };
 
                                             tracing::info!(
-                                                "📩 groups_exchange from {}",
+                                                "📩 groups_exchange from {} (full: {})",
+                                                &from_node[..16.min(from_node.len())],
+                                                from_node
+                                            );
+
+                                            let groups = match json.get("local_groups").and_then(|v| v.as_array()) {
+                                                Some(g) => g,
+                                                None => {
+                                                    tracing::warn!("groups_exchange missing local_groups!");
+                                                    continue;
+                                                }
+                                            };
+
+                                            tracing::info!(
+                                                "📋 Processing {} groups for peer {}",
+                                                groups.len(),
                                                 &from_node[..16.min(from_node.len())]
                                             );
 
-                                            if let Some(groups) = json.get("local_groups").and_then(|v| v.as_array()) {
-                                                let mut introductions: Vec<(String, Vec<String>)> = Vec::new();
+                                            let mut introductions: Vec<(String, Vec<String>)> = Vec::new();
 
-                                                for group in groups {
-                                                    if let Some(gid) = group.as_str() {
-                                                        match peer_tracker_clone.upsert_peer(gid, &sender_str).await {
-                                                            Ok(is_new) => {
-                                                                let peers = peer_tracker_clone.get_peers(gid).await;
+                                            for group in groups {
+                                                if let Some(gid) = group.as_str() {
+                                                    let peer_pk = from_node.parse::<iroh::PublicKey>().ok();
 
-                                                                if is_new {
-                                                                    tracing::info!(
-                                                                        "📝 New peer {} for group {} ({} total)",
-                                                                        &sender_str[..16],
-                                                                        &gid[..16.min(gid.len())],
-                                                                        peers.len()
-                                                                    );
-                                                                }
-
-                                                                if peers.len() > 1 {
-                                                                    introductions.push((gid.to_string(), peers));
-                                                                }
+                                                    if let Some(sender) = group_topic_senders.get(gid) {
+                                                        // Already subscribed - add new peer via join_peers
+                                                        if let Some(pk) = peer_pk {
+                                                            if let Err(e) = sender.join_peers(vec![pk]).await {
+                                                                tracing::debug!(
+                                                                    "join_peers for group {} peer {}: {}",
+                                                                    &gid[..16.min(gid.len())],
+                                                                    &from_node[..16.min(from_node.len())],
+                                                                    e
+                                                                );
+                                                            } else {
+                                                                tracing::info!(
+                                                                    "📡 Added peer {} to group topic {}",
+                                                                    &from_node[..16.min(from_node.len())],
+                                                                    &gid[..16.min(gid.len())]
+                                                                );
                                                             }
-                                                            Err(e) => tracing::warn!("Failed to track peer: {}", e),
+                                                        }
+                                                    } else {
+                                                        // New group - subscribe with announcing peer
+                                                        let group_topic_id = TopicId::from_bytes(
+                                                            blake3::hash(format!("cyan/group/{}", gid).as_bytes()).as_bytes()
+                                                                [..32]
+                                                                .try_into()
+                                                                .unwrap_or([0u8; 32]),
+                                                        );
+
+                                                        let peers = peer_pk.map(|pk| vec![pk]).unwrap_or_default();
+
+                                                        match gossip_clone.subscribe(group_topic_id, peers).await {
+                                                            Ok(topic) => {
+                                                                let (sender, mut receiver) = topic.split();
+                                                                group_topic_senders.insert(gid.to_string(), sender);
+
+                                                                // Forward group events to main event channel
+                                                                let gid_clone = gid.to_string();
+                                                                let inbound_tx_for_group = inbound_tx_clone.clone();
+                                                                tokio::spawn(async move {
+                                                                    while let Some(event) = receiver.next().await {
+                                                                        match event {
+                                                                            Ok(iroh_gossip::api::Event::Received(msg)) => {
+                                                                                // Create Event from group message
+                                                                                let content = msg.content.to_vec();
+                                                                                let ts = std::time::SystemTime::now()
+                                                                                    .duration_since(std::time::UNIX_EPOCH)
+                                                                                    .map(|d| d.as_secs())
+                                                                                    .unwrap_or(0);
+                                                                                
+                                                                                let evt = Event {
+                                                                                    id: blake3::hash(&content).to_hex().to_string(),
+                                                                                    payload: String::from_utf8_lossy(&content).to_string(),
+                                                                                    source: format!("group/{}", gid_clone),
+                                                                                    ts,
+                                                                                };
+                                                                                
+                                                                                tracing::info!(
+                                                                                    "📨 [GROUP {}] Forwarding event: {}",
+                                                                                    &gid_clone[..16.min(gid_clone.len())],
+                                                                                    &evt.id[..16]
+                                                                                );
+                                                                                
+                                                                                if let Err(e) = inbound_tx_for_group.send(evt) {
+                                                                                    tracing::error!(
+                                                                                        "Failed to forward group event: {}",
+                                                                                        e
+                                                                                    );
+                                                                                }
+                                                                            }
+                                                                            Ok(iroh_gossip::api::Event::NeighborUp(peer)) => {
+                                                                                tracing::info!(
+                                                                                    "🟢 [GROUP {}] Neighbor up: {}",
+                                                                                    &gid_clone[..16.min(gid_clone.len())],
+                                                                                    &peer.to_string()[..16]
+                                                                                );
+                                                                            }
+                                                                            Ok(iroh_gossip::api::Event::NeighborDown(peer)) => {
+                                                                                tracing::info!(
+                                                                                    "🔴 [GROUP {}] Neighbor down: {}",
+                                                                                    &gid_clone[..16.min(gid_clone.len())],
+                                                                                    &peer.to_string()[..16]
+                                                                                );
+                                                                            }
+                                                                            Ok(iroh_gossip::api::Event::Lagged) => {
+                                                                                tracing::warn!(
+                                                                                    "⚠️ [GROUP {}] Lagged",
+                                                                                    &gid_clone[..16.min(gid_clone.len())]
+                                                                                );
+                                                                            }
+                                                                            Err(e) => {
+                                                                                tracing::error!(
+                                                                                    "🔴 [GROUP {}] Receiver error: {}",
+                                                                                    &gid_clone[..16.min(gid_clone.len())],
+                                                                                    e
+                                                                                );
+                                                                            }
+                                                                        }
+                                                                    }
+                                                                });
+
+                                                                tracing::info!(
+                                                                    "📡 Subscribed to group topic: {}... (with peer {})",
+                                                                    &gid[..16.min(gid.len())],
+                                                                    &from_node[..16.min(from_node.len())]
+                                                                );
+                                                            }
+                                                            Err(e) => {
+                                                                tracing::warn!(
+                                                                    "Failed to subscribe to group topic {}: {}",
+                                                                    &gid[..16.min(gid.len())],
+                                                                    e
+                                                                );
+                                                            }
                                                         }
                                                     }
+
+                                                    // Use from_node (the actual peer) not delivered_from
+                                                    match peer_tracker_clone.upsert_peer(gid, from_node).await {
+                                                        Ok(is_new) => {
+                                                            let peers = peer_tracker_clone.get_peers(gid).await;
+
+                                                            if is_new {
+                                                                tracing::info!(
+                                                                    "📝 New peer {} for group {} ({} total)",
+                                                                    &from_node[..16.min(from_node.len())],
+                                                                    &gid[..16.min(gid.len())],
+                                                                    peers.len()
+                                                                );
+                                                            }
+
+                                                            if peers.len() > 1 {
+                                                                introductions.push((gid.to_string(), peers));
+                                                            }
+                                                        }
+                                                        Err(e) => tracing::warn!("Failed to track peer: {}", e),
+                                                    }
                                                 }
+                                            }
 
-                                                // Broadcast peer introductions
-                                                for (group_id, peers) in introductions {
-                                                    let intro_msg = serde_json::json!({
-                                                        "msg_type": "peer_introduction",
-                                                        "group_id": group_id,
-                                                        "peers": peers,
-                                                    });
+                                            // Broadcast peer introductions
+                                            for (group_id, peers) in introductions {
+                                                let intro_msg = serde_json::json!({
+                                                    "msg_type": "peer_introduction",
+                                                    "group_id": group_id,
+                                                    "peers": peers,
+                                                });
 
-                                                    tracing::info!(
-                                                        "📢 Broadcasting peer_introduction for {} ({} peers)",
-                                                        &group_id[..16.min(group_id.len())],
-                                                        peers.len()
-                                                    );
+                                                tracing::info!(
+                                                    "📢 Broadcasting peer_introduction for {} ({} peers)",
+                                                    &group_id[..16.min(group_id.len())],
+                                                    peers.len()
+                                                );
 
-                                                    let _ = discovery_topic.broadcast(
-                                                        Bytes::from(intro_msg.to_string())
-                                                    ).await;
-                                                }
+                                                let _ = discovery_topic.broadcast(
+                                                    Bytes::from(intro_msg.to_string())
+                                                ).await;
                                             }
                                         }
                                     }
@@ -893,4 +1112,6 @@ mod tests {
             .expect("failed to create XaeroFlux with custom relay");
         assert!(!xf.node_id.is_empty());
     }
-}
+}pub mod rendezvous;
+pub mod snapshot;
+pub mod swarm;
