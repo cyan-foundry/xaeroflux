@@ -1,0 +1,47 @@
+name: CI
+
+on:
+  push:
+    branches: [main, 'feat/**', 'fix/**', 'ci/**']
+  pull_request:
+    branches: [main]
+  schedule:
+    # Nightly. Staggered across the Cyan repos to avoid simultaneous runs.
+    - cron: '17 7 * * *'
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  # iroh/gossip + substrate tests are stack-hungry; give threads more headroom.
+  RUST_MIN_STACK: '16777216'
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # rust-toolchain.toml pins nightly for this repo.
+      - name: Install Rust (nightly)
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Format check
+        # Non-blocking: pre-existing formatting must not gate the build/test/clippy signal.
+        continue-on-error: true
+        run: cargo fmt --all -- --check
+
+      - name: Build
+        run: cargo build --all-targets
+
+      # Default features only. Real-infra / multi-process tests are #[ignore]d by design
+      # (in-process substrate suite uses loopback + temp DBs) — do NOT pass --ignored.
+      - name: Test
+        run: cargo test
+
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
