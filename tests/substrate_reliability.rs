@@ -6,7 +6,7 @@ mod support;
 use std::time::Duration;
 
 use support::{
-    count_events, establish_mesh, make_event, spawn_local_node, unique_key, wait_for_event, T,
+    T, count_events, establish_mesh, make_event, spawn_local_node, unique_key, wait_for_event,
 };
 
 /// X7 — form and tear down the full mesh 15× in a loop; every iteration must converge within T.
@@ -20,9 +20,13 @@ async fn repeat_mesh_forms_is_stable() {
         let peer_a = spawn_local_node("peer_a", &key, &[bootstrap.node_id.clone()]).await;
         let mut peer_b = spawn_local_node("peer_b", &key, &[bootstrap.node_id.clone()]).await;
 
-        establish_mesh(&peer_a, &mut [&mut bootstrap.event_rx, &mut peer_b.event_rx], T)
-            .await
-            .unwrap_or_else(|e| panic!("iteration {i}/{ITERATIONS}: mesh failed to form: {e}"));
+        establish_mesh(
+            &peer_a,
+            &mut [&mut bootstrap.event_rx, &mut peer_b.event_rx],
+            T,
+        )
+        .await
+        .unwrap_or_else(|e| panic!("iteration {i}/{ITERATIONS}: mesh failed to form: {e}"));
         // bootstrap / peer_a / peer_b drop here, ending the iteration's mesh.
     }
 }
@@ -67,8 +71,18 @@ async fn concurrent_meshes_do_not_interfere() {
         .await
         .expect("mesh 1 peer_b should receive mesh 1's event");
 
-    let leaked_b2 = count_events(&mut b2.event_rx, |e| e.payload == tag, Duration::from_secs(2)).await;
-    let leaked_c2 = count_events(&mut c2.event_rx, |e| e.payload == tag, Duration::from_secs(2)).await;
+    let leaked_b2 = count_events(
+        &mut b2.event_rx,
+        |e| e.payload == tag,
+        Duration::from_secs(2),
+    )
+    .await;
+    let leaked_c2 = count_events(
+        &mut c2.event_rx,
+        |e| e.payload == tag,
+        Duration::from_secs(2),
+    )
+    .await;
     assert_eq!(leaked_b2, 0, "mesh 1 event leaked to mesh 2 bootstrap");
     assert_eq!(leaked_c2, 0, "mesh 1 event leaked to mesh 2 peer");
 }

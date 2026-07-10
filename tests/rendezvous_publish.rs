@@ -10,12 +10,16 @@
 
 #![allow(clippy::disallowed_methods)]
 
-use std::net::SocketAddr;
-use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::{
+    net::SocketAddr,
+    path::{Path, PathBuf},
+    time::Duration,
+};
 
-use xaeroflux::XaeroFlux;
-use xaeroflux::rendezvous::{SignedRendezvousConfig, FileSink, publish_signed, verify_config};
+use xaeroflux::{
+    XaeroFlux,
+    rendezvous::{FileSink, SignedRendezvousConfig, publish_signed, verify_config},
+};
 
 const RELAY: &str = "https://quic.dev.cyan.blockxaero.io";
 const TS: u64 = 1_700_000_000;
@@ -80,7 +84,10 @@ async fn bootstrap_publishes_rendezvous_config_on_start() {
     publish_to(&xf, &path);
 
     // The well-known file now exists and round-trips to a signed config for THIS node.
-    assert!(path.exists(), "publish-on-start must write the rendezvous file");
+    assert!(
+        path.exists(),
+        "publish-on-start must write the rendezvous file"
+    );
     let published = read_published(&path);
     assert_eq!(published.config.bootstrap.node_id, xf.node_id);
     assert_eq!(published.config.discovery_key, "cyan-test");
@@ -96,13 +103,19 @@ async fn config_is_signed_and_verifiable() {
     let published = read_published(&path);
 
     // Self-published: the signer is this node, and the signature verifies.
-    assert_eq!(published.signer, xf.node_id, "self-published config is signed by the node itself");
+    assert_eq!(
+        published.signer, xf.node_id,
+        "self-published config is signed by the node itself"
+    );
     verify_config(&published).expect("published config must verify");
 
     // A tampered config must NOT verify.
     let mut tampered = published.clone();
     tampered.config.bootstrap.addr = vec!["10.0.0.1:9999".to_string()];
-    assert!(verify_config(&tampered).is_err(), "tampered config must fail verification");
+    assert!(
+        verify_config(&tampered).is_err(),
+        "tampered config must fail verification"
+    );
 }
 
 #[tokio::test]
@@ -121,18 +134,31 @@ async fn config_carries_real_node_id_addr_relay_discovery_key() {
     // The configured relay is carried through.
     assert_eq!(cfg.relay_url.as_deref(), Some(RELAY));
     // Real, dialable direct addresses from the bound endpoint.
-    assert!(!cfg.bootstrap.addr.is_empty(), "offline node should bind at least one direct address");
+    assert!(
+        !cfg.bootstrap.addr.is_empty(),
+        "offline node should bind at least one direct address"
+    );
     for a in &cfg.bootstrap.addr {
-        a.parse::<SocketAddr>().unwrap_or_else(|_| panic!("addr `{a}` should be a real SocketAddr"));
+        a.parse::<SocketAddr>()
+            .unwrap_or_else(|_| panic!("addr `{a}` should be a real SocketAddr"));
     }
     // The advertised addresses are the node's OWN bound addresses.
-    let observed: Vec<String> = xf.endpoint.addr().ip_addrs().map(|s| s.to_string()).collect();
-    assert_eq!(cfg.bootstrap.addr, observed, "config must carry the node's own bound addresses");
+    let observed: Vec<String> = xf
+        .endpoint
+        .addr()
+        .ip_addrs()
+        .map(|s| s.to_string())
+        .collect();
+    assert_eq!(
+        cfg.bootstrap.addr, observed,
+        "config must carry the node's own bound addresses"
+    );
 }
 
 #[tokio::test]
 async fn republish_on_restart_reflects_new_identity() {
-    // Same well-known sink path across a redeploy; a fresh identity (new node.key) must be reflected.
+    // Same well-known sink path across a redeploy; a fresh identity (new node.key) must be
+    // reflected.
     let dir = unique_dir("restart");
     let path = dir.join("rendezvous.json");
 
@@ -153,7 +179,10 @@ async fn republish_on_restart_reflects_new_identity() {
     let published_b = read_published(&path);
 
     assert_ne!(id_a, xf_b.node_id, "a fresh key must yield a new node_id");
-    assert_eq!(published_b.config.bootstrap.node_id, xf_b.node_id, "republish reflects the new identity");
+    assert_eq!(
+        published_b.config.bootstrap.node_id, xf_b.node_id,
+        "republish reflects the new identity"
+    );
     assert_eq!(published_b.signer, xf_b.node_id);
     verify_config(&published_b).expect("republished config must verify under the new key");
 }

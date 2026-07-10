@@ -11,13 +11,10 @@
 // Snapshot contains: groups, workspaces, boards, objects (files), chats
 // Does NOT contain: whiteboard elements, notebook cells (too granular, sync via events)
 
-use std::collections::HashMap;
-use std::sync::Arc;
-use std::time::Duration;
+use std::{collections::HashMap, sync::Arc};
 
 use anyhow::Result;
-use bytes::Bytes;
-use iroh::{endpoint::SendStream, Endpoint, PublicKey};
+use iroh::{Endpoint, PublicKey, endpoint::SendStream};
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 
@@ -38,7 +35,7 @@ pub enum SnapshotMessage {
         /// Timestamp of last known event (0 for full snapshot)
         since_ts: u64,
     },
-    
+
     /// Peer announces it has snapshot data available
     SnapshotAvailable {
         group_id: String,
@@ -119,6 +116,7 @@ pub struct ChatData {
 pub struct SnapshotProvider {
     /// group_id -> GroupSnapshot
     snapshots: Arc<RwLock<HashMap<String, GroupSnapshot>>>,
+    #[allow(dead_code)]
     endpoint: Endpoint,
     node_id: String,
 }
@@ -135,10 +133,11 @@ impl SnapshotProvider {
     /// Update snapshot from incoming events (called by bootstrap)
     pub async fn update_from_event(&self, group_id: &str, event: &super::Event) {
         let mut snapshots = self.snapshots.write().await;
-        
+
         // Get or create snapshot for this group
-        let snapshot = snapshots.entry(group_id.to_string()).or_insert_with(|| {
-            GroupSnapshot {
+        let snapshot = snapshots
+            .entry(group_id.to_string())
+            .or_insert_with(|| GroupSnapshot {
                 group: GroupData {
                     id: group_id.to_string(),
                     name: String::new(),
@@ -151,63 +150,62 @@ impl SnapshotProvider {
                 files: Vec::new(),
                 recent_chats: Vec::new(),
                 snapshot_ts: 0,
-            }
-        });
+            });
 
         // Try to parse and update snapshot based on event type
         // This is a simplified version - in production, parse NetworkEvent properly
-        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&event.payload) {
-            if let Some(event_type) = parsed.get("type").and_then(|v| v.as_str()) {
-                match event_type {
-                    "GroupCreated" => {
-                        if let Ok(group) = serde_json::from_value::<GroupData>(parsed.clone()) {
-                            snapshot.group = group;
-                        }
+        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&event.payload)
+            && let Some(event_type) = parsed.get("type").and_then(|v| v.as_str())
+        {
+            match event_type {
+                "GroupCreated" => {
+                    if let Ok(group) = serde_json::from_value::<GroupData>(parsed.clone()) {
+                        snapshot.group = group;
                     }
-                    "WorkspaceCreated" => {
-                        if let Ok(ws) = serde_json::from_value::<WorkspaceData>(parsed.clone()) {
-                            if !snapshot.workspaces.iter().any(|w| w.id == ws.id) {
-                                snapshot.workspaces.push(ws);
-                            }
-                        }
-                    }
-                    "BoardCreated" => {
-                        if let (Some(id), Some(ws_id), Some(name)) = (
-                            parsed.get("id").and_then(|v| v.as_str()),
-                            parsed.get("workspace_id").and_then(|v| v.as_str()),
-                            parsed.get("name").and_then(|v| v.as_str()),
-                        ) {
-                            if !snapshot.boards.iter().any(|b| b.id == id) {
-                                snapshot.boards.push(BoardData {
-                                    id: id.to_string(),
-                                    workspace_id: ws_id.to_string(),
-                                    name: name.to_string(),
-                                    board_mode: "freeform".to_string(),
-                                    created_at: parsed.get("created_at")
-                                        .and_then(|v| v.as_i64())
-                                        .unwrap_or(0),
-                                });
-                            }
-                        }
-                    }
-                    "FileAvailable" => {
-                        if let Ok(file) = serde_json::from_value::<FileData>(parsed.clone()) {
-                            if !snapshot.files.iter().any(|f| f.id == file.id) {
-                                snapshot.files.push(file);
-                            }
-                        }
-                    }
-                    "ChatSent" => {
-                        if let Ok(chat) = serde_json::from_value::<ChatData>(parsed.clone()) {
-                            // Keep only recent chats (last 100)
-                            if snapshot.recent_chats.len() >= 100 {
-                                snapshot.recent_chats.remove(0);
-                            }
-                            snapshot.recent_chats.push(chat);
-                        }
-                    }
-                    _ => {}
                 }
+                "WorkspaceCreated" => {
+                    if let Ok(ws) = serde_json::from_value::<WorkspaceData>(parsed.clone())
+                        && !snapshot.workspaces.iter().any(|w| w.id == ws.id)
+                    {
+                        snapshot.workspaces.push(ws);
+                    }
+                }
+                "BoardCreated" => {
+                    if let (Some(id), Some(ws_id), Some(name)) = (
+                        parsed.get("id").and_then(|v| v.as_str()),
+                        parsed.get("workspace_id").and_then(|v| v.as_str()),
+                        parsed.get("name").and_then(|v| v.as_str()),
+                    ) && !snapshot.boards.iter().any(|b| b.id == id)
+                    {
+                        snapshot.boards.push(BoardData {
+                            id: id.to_string(),
+                            workspace_id: ws_id.to_string(),
+                            name: name.to_string(),
+                            board_mode: "freeform".to_string(),
+                            created_at: parsed
+                                .get("created_at")
+                                .and_then(|v| v.as_i64())
+                                .unwrap_or(0),
+                        });
+                    }
+                }
+                "FileAvailable" => {
+                    if let Ok(file) = serde_json::from_value::<FileData>(parsed.clone())
+                        && !snapshot.files.iter().any(|f| f.id == file.id)
+                    {
+                        snapshot.files.push(file);
+                    }
+                }
+                "ChatSent" => {
+                    if let Ok(chat) = serde_json::from_value::<ChatData>(parsed.clone()) {
+                        // Keep only recent chats (last 100)
+                        if snapshot.recent_chats.len() >= 100 {
+                            snapshot.recent_chats.remove(0);
+                        }
+                        snapshot.recent_chats.push(chat);
+                    }
+                }
+                _ => {}
             }
         }
 
@@ -223,7 +221,7 @@ impl SnapshotProvider {
     /// Handle incoming snapshot request (called when we receive RequestSnapshot)
     pub async fn handle_request(&self, group_id: &str) -> Option<SnapshotMessage> {
         let snapshots = self.snapshots.read().await;
-        
+
         if let Some(snapshot) = snapshots.get(group_id) {
             let item_count = 1  // group
                 + snapshot.workspaces.len() as u32
@@ -259,7 +257,7 @@ impl SnapshotProvider {
         // Serialize and send snapshot
         let data = serde_json::to_vec(&snapshot)?;
         let len = (data.len() as u32).to_be_bytes();
-        
+
         send.write_all(&len).await?;
         send.write_all(&data).await?;
         send.finish()?;
@@ -268,8 +266,10 @@ impl SnapshotProvider {
             "Served snapshot for group {} ({} bytes, {} items)",
             &group_id[..16.min(group_id.len())],
             data.len(),
-            1 + snapshot.workspaces.len() + snapshot.boards.len() + 
-            snapshot.files.len() + snapshot.recent_chats.len()
+            1 + snapshot.workspaces.len()
+                + snapshot.boards.len()
+                + snapshot.files.len()
+                + snapshot.recent_chats.len()
         );
 
         Ok(())
@@ -299,9 +299,9 @@ impl SnapshotRequester {
     /// Check if we need a snapshot for this group
     pub async fn needs_snapshot(&self, group_id: &str) -> bool {
         let sync_state = self.sync_state.read().await;
-        
+
         match sync_state.get(group_id) {
-            None => true,  // Never synced
+            None => true, // Never synced
             Some(&last_ts) => {
                 // Request new snapshot if last sync was > 6 hours ago
                 let now = std::time::SystemTime::now()
@@ -318,7 +318,7 @@ impl SnapshotRequester {
         SnapshotMessage::RequestSnapshot {
             group_id: group_id.to_string(),
             requester_node_id: self.node_id.clone(),
-            since_ts: 0,  // Full snapshot
+            since_ts: 0, // Full snapshot
         }
     }
 
@@ -329,11 +329,9 @@ impl SnapshotRequester {
         group_id: &str,
     ) -> Result<GroupSnapshot> {
         let node_id: PublicKey = provider_node_id.parse()?;
-        
+
         // Connect to provider
-        let conn = self.endpoint
-            .connect(node_id, SNAPSHOT_ALPN)
-            .await?;
+        let conn = self.endpoint.connect(node_id, SNAPSHOT_ALPN).await?;
 
         let (mut send, mut recv) = conn.open_bi().await?;
 
@@ -391,7 +389,7 @@ pub fn should_request_snapshot(
     if local_item_count == 0 {
         return true;
     }
-    
+
     // Request if remote has 20%+ more items
     if remote_item_count as usize > local_item_count * 12 / 10 {
         return true;

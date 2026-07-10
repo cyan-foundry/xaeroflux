@@ -14,8 +14,7 @@
 //! Everything here is pure and offline — no network, no I/O beyond the chosen sink —
 //! so it is fully testable with the file-writer default.
 
-use std::path::PathBuf;
-use std::str::FromStr;
+use std::{path::PathBuf, str::FromStr};
 
 use anyhow::{Context, Result, anyhow};
 use iroh::{PublicKey, SecretKey, Signature};
@@ -143,8 +142,9 @@ pub fn publish_signed(sink: &dyn ConfigSink, signed: &SignedRendezvousConfig) ->
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use rand_chacha::rand_core::SeedableRng;
+
+    use super::*;
 
     fn key(seed: u8) -> SecretKey {
         let mut rng = rand_chacha::ChaCha8Rng::from_seed([seed; 32]);
@@ -177,7 +177,10 @@ mod tests {
         let sk = key(2);
         let mut signed = sign_config(sample_config(sk.public().to_string()), &sk).expect("sign");
         signed.config.bootstrap.addr = vec!["10.0.0.1:9999".to_string()];
-        assert!(verify_config(&signed).is_err(), "tampered config must not verify");
+        assert!(
+            verify_config(&signed).is_err(),
+            "tampered config must not verify"
+        );
     }
 
     #[test]
@@ -186,6 +189,9 @@ mod tests {
         let other = key(4);
         let mut signed = sign_config(sample_config(sk.public().to_string()), &sk).expect("sign");
         signed.signer = other.public().to_string();
-        assert!(verify_config(&signed).is_err(), "signature must not verify under a different key");
+        assert!(
+            verify_config(&signed).is_err(),
+            "signature must not verify under a different key"
+        );
     }
 }

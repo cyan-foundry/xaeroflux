@@ -3,26 +3,30 @@
 // preloads a GroupSnapshot (via the public `update_from_event`) and serves it to the requester.
 
 // `clippy.toml` sets `allow-unwrap-in-tests = true`, but that allowance does not reach `unwrap()`
-// calls emitted inside macro expansions (e.g. `serde_json::json!`) within an integration-test crate.
-// This is test code where the project already permits unwrap, so allow it at the file level.
+// calls emitted inside macro expansions (e.g. `serde_json::json!`) within an integration-test
+// crate. This is test code where the project already permits unwrap, so allow it at the file level.
 #![allow(clippy::disallowed_methods)]
 
 mod support;
 
-use std::sync::Arc;
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 use anyhow::Result;
 use iroh::endpoint::{Connection, SendStream};
 use support::{offline_endpoint, unique_key};
-use xaeroflux::snapshot::{SnapshotMessage, SnapshotProvider, SnapshotRequester, SNAPSHOT_ALPN};
-use xaeroflux::Event;
+use xaeroflux::{
+    Event,
+    snapshot::{SNAPSHOT_ALPN, SnapshotMessage, SnapshotProvider, SnapshotRequester},
+};
 
-/// Synthesize an application `Event` whose JSON payload drives `SnapshotProvider::update_from_event`
-/// (the only public way to populate a provider's in-memory `GroupSnapshot`).
+/// Synthesize an application `Event` whose JSON payload drives
+/// `SnapshotProvider::update_from_event` (the only public way to populate a provider's in-memory
+/// `GroupSnapshot`).
 fn ev(payload: serde_json::Value) -> Event {
     Event {
-        id: blake3::hash(payload.to_string().as_bytes()).to_hex().to_string(),
+        id: blake3::hash(payload.to_string().as_bytes())
+            .to_hex()
+            .to_string(),
         payload: payload.to_string(),
         source: "test".to_string(),
         ts: 42,
@@ -60,7 +64,10 @@ async fn snapshot_request_serve_round_trips() {
     let requester_id = requester_ep.id().to_string();
 
     // Preload a non-empty GroupSnapshot for "g1" through the public mutator.
-    let provider = Arc::new(SnapshotProvider::new(provider_ep.clone(), provider_id.clone()));
+    let provider = Arc::new(SnapshotProvider::new(
+        provider_ep.clone(),
+        provider_id.clone(),
+    ));
     provider
         .update_from_event(
             "g1",
@@ -79,8 +86,14 @@ async fn snapshot_request_serve_round_trips() {
             })),
         )
         .await;
-    let preloaded = provider.get_snapshot("g1").await.expect("snapshot preloaded");
-    assert!(!preloaded.workspaces.is_empty(), "preload should create a workspace");
+    let preloaded = provider
+        .get_snapshot("g1")
+        .await
+        .expect("snapshot preloaded");
+    assert!(
+        !preloaded.workspaces.is_empty(),
+        "preload should create a workspace"
+    );
 
     // Drive the provider's accept loop in the background.
     let prov = provider.clone();
@@ -106,7 +119,10 @@ async fn snapshot_request_serve_round_trips() {
     });
 
     let requester = SnapshotRequester::new(requester_ep, requester_id);
-    assert!(requester.needs_snapshot("g1").await, "fresh requester needs a snapshot");
+    assert!(
+        requester.needs_snapshot("g1").await,
+        "fresh requester needs a snapshot"
+    );
 
     // Bounded: never an unbounded await on the network.
     let downloaded = tokio::time::timeout(
@@ -119,8 +135,14 @@ async fn snapshot_request_serve_round_trips() {
     let snapshot = downloaded
         .expect("snapshot download timed out")
         .expect("snapshot download failed");
-    assert!(!snapshot.workspaces.is_empty(), "served snapshot must carry workspaces");
-    assert_eq!(snapshot.group.id, "g1", "served snapshot is for the wrong group");
+    assert!(
+        !snapshot.workspaces.is_empty(),
+        "served snapshot must carry workspaces"
+    );
+    assert_eq!(
+        snapshot.group.id, "g1",
+        "served snapshot is for the wrong group"
+    );
 }
 
 /// X6 (data model) — the snapshot *store* round-trips through the public API without the network:
@@ -153,7 +175,10 @@ async fn snapshot_store_preload_and_serve_message() {
         )
         .await;
 
-    let snapshot = provider.get_snapshot("g1").await.expect("snapshot exists for g1");
+    let snapshot = provider
+        .get_snapshot("g1")
+        .await
+        .expect("snapshot exists for g1");
     assert_eq!(snapshot.group.id, "g1");
     assert_eq!(snapshot.group.name, "Group One");
     assert_eq!(snapshot.workspaces.len(), 1, "one workspace preloaded");
@@ -161,9 +186,16 @@ async fn snapshot_store_preload_and_serve_message() {
 
     // handle_request advertises availability with item_count = 1 (group) + 1 (workspace) = 2.
     match provider.handle_request("g1").await {
-        Some(SnapshotMessage::SnapshotAvailable { group_id, item_count, .. }) => {
+        Some(SnapshotMessage::SnapshotAvailable {
+            group_id,
+            item_count,
+            ..
+        }) => {
             assert_eq!(group_id, "g1");
-            assert_eq!(item_count, 2, "item_count = group + workspaces + boards + files + chats");
+            assert_eq!(
+                item_count, 2,
+                "item_count = group + workspaces + boards + files + chats"
+            );
         }
         other => panic!("expected SnapshotAvailable for g1, got {other:?}"),
     }

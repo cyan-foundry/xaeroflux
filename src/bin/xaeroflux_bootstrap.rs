@@ -12,24 +12,30 @@
 // Build: cargo build --release --bin xaeroflux_bootstrap
 // Run:   IGGY_ADDR=10.0.x.x:8090 ./xaeroflux_bootstrap
 
-use std::collections::HashMap;
-use std::env;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
-use std::time::Duration;
-use tokio::sync::RwLock;
-use xaeroflux::rendezvous::{FileSink, publish_signed};
-use xaeroflux::{Event, XaeroFlux};
+use std::{
+    collections::HashMap,
+    env,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::Duration,
+};
 
-use iggy::client::{Client, ConsumerGroupClient, MessageClient, StreamClient, TopicClient};
-use iggy::clients::client::IggyClient;
-use iggy::compression::compression_algorithm::CompressionAlgorithm;
-use iggy::identifier::Identifier;
-use iggy::messages::send_messages::{Message, Partitioning};
-use iggy::utils::expiry::IggyExpiry;
-use iggy::utils::topic_size::MaxTopicSize;
-
+use iggy::{
+    client::{Client, ConsumerGroupClient, MessageClient, StreamClient, TopicClient},
+    clients::client::IggyClient,
+    compression::compression_algorithm::CompressionAlgorithm,
+    identifier::Identifier,
+    messages::send_messages::{Message, Partitioning},
+    utils::{expiry::IggyExpiry, topic_size::MaxTopicSize},
+};
 use serde::{Deserialize, Serialize};
+use tokio::sync::RwLock;
+use xaeroflux::{
+    XaeroFlux,
+    rendezvous::{FileSink, publish_signed},
+};
 
 const STREAM_NAME: &str = "cyan-lens";
 const TOPIC_NAME: &str = "events.raw";
@@ -59,19 +65,48 @@ pub struct Workspace {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum NetworkEvent {
-    GroupSnapshotAvailable { source: String, group_id: String },
+    GroupSnapshotAvailable {
+        source: String,
+        group_id: String,
+    },
     GroupCreated(Group),
-    GroupRenamed { id: String, name: String },
-    GroupDeleted { id: String },
-    GroupDissolved { id: String },
+    GroupRenamed {
+        id: String,
+        name: String,
+    },
+    GroupDeleted {
+        id: String,
+    },
+    GroupDissolved {
+        id: String,
+    },
     WorkspaceCreated(Workspace),
-    WorkspaceRenamed { id: String, name: String },
-    WorkspaceDeleted { id: String },
-    WorkspaceDissolved { id: String },
-    BoardCreated { id: String, workspace_id: String, name: String, created_at: i64 },
-    BoardRenamed { id: String, name: String },
-    BoardDeleted { id: String },
-    BoardDissolved { id: String },
+    WorkspaceRenamed {
+        id: String,
+        name: String,
+    },
+    WorkspaceDeleted {
+        id: String,
+    },
+    WorkspaceDissolved {
+        id: String,
+    },
+    BoardCreated {
+        id: String,
+        workspace_id: String,
+        name: String,
+        created_at: i64,
+    },
+    BoardRenamed {
+        id: String,
+        name: String,
+    },
+    BoardDeleted {
+        id: String,
+    },
+    BoardDissolved {
+        id: String,
+    },
     FileAvailable {
         id: String,
         group_id: Option<String>,
@@ -91,12 +126,17 @@ pub enum NetworkEvent {
         parent_id: Option<String>,
         timestamp: i64,
     },
-    ChatDeleted { id: String },
+    ChatDeleted {
+        id: String,
+    },
     WhiteboardElementAdded {
         id: String,
         board_id: String,
         element_type: String,
-        x: f64, y: f64, width: f64, height: f64,
+        x: f64,
+        y: f64,
+        width: f64,
+        height: f64,
         z_index: i32,
         style_json: Option<String>,
         content_json: Option<String>,
@@ -107,14 +147,22 @@ pub enum NetworkEvent {
         id: String,
         board_id: String,
         element_type: String,
-        x: f64, y: f64, width: f64, height: f64,
+        x: f64,
+        y: f64,
+        width: f64,
+        height: f64,
         z_index: i32,
         style_json: Option<String>,
         content_json: Option<String>,
         updated_at: i64,
     },
-    WhiteboardElementDeleted { id: String, board_id: String },
-    WhiteboardCleared { board_id: String },
+    WhiteboardElementDeleted {
+        id: String,
+        board_id: String,
+    },
+    WhiteboardCleared {
+        board_id: String,
+    },
     NotebookCellAdded {
         id: String,
         board_id: String,
@@ -133,9 +181,18 @@ pub enum NetworkEvent {
         height: Option<f64>,
         metadata_json: Option<String>,
     },
-    NotebookCellDeleted { id: String, board_id: String },
-    NotebookCellsReordered { board_id: String, cell_ids: Vec<String> },
-    BoardModeChanged { board_id: String, mode: String },
+    NotebookCellDeleted {
+        id: String,
+        board_id: String,
+    },
+    NotebookCellsReordered {
+        board_id: String,
+        cell_ids: Vec<String>,
+    },
+    BoardModeChanged {
+        board_id: String,
+        mode: String,
+    },
     BoardMetadataUpdated {
         board_id: String,
         labels: Vec<String>,
@@ -143,9 +200,19 @@ pub enum NetworkEvent {
         contains_model: Option<String>,
         contains_skills: Vec<String>,
     },
-    BoardLabelsUpdated { board_id: String, labels: Vec<String> },
-    BoardRated { board_id: String, rating: i32 },
-    ProfileUpdated { node_id: String, display_name: String, avatar_hash: Option<String> },
+    BoardLabelsUpdated {
+        board_id: String,
+        labels: Vec<String>,
+    },
+    BoardRated {
+        board_id: String,
+        rating: i32,
+    },
+    ProfileUpdated {
+        node_id: String,
+        display_name: String,
+        avatar_hash: Option<String>,
+    },
 }
 
 // ============================================================================
@@ -157,8 +224,8 @@ pub struct RawEvent {
     pub id: String,
     pub group_id: String,
     pub workspace_id: String,
-    pub source: String,        // "cyan", "cyan_chat", "cyan_file", etc.
-    pub content_kind: String,  // "cyan_group", "cyan_chat", "cyan_file", etc.
+    pub source: String,       // "cyan", "cyan_chat", "cyan_file", etc.
+    pub content_kind: String, // "cyan_group", "cyan_chat", "cyan_file", etc.
     pub external_id: String,
     pub content: String,
     pub author_id: String,
@@ -189,26 +256,28 @@ impl ScopeTracker {
     }
 
     fn track_workspace(&mut self, workspace_id: &str, group_id: &str) {
-        self.workspace_to_group.insert(workspace_id.to_string(), group_id.to_string());
+        self.workspace_to_group
+            .insert(workspace_id.to_string(), group_id.to_string());
     }
 
     fn track_board(&mut self, board_id: &str, workspace_id: &str) {
-        self.board_to_workspace.insert(board_id.to_string(), workspace_id.to_string());
+        self.board_to_workspace
+            .insert(board_id.to_string(), workspace_id.to_string());
     }
 
     fn get_group_for_workspace(&self, workspace_id: &str) -> Option<&String> {
         self.workspace_to_group.get(workspace_id)
     }
 
-    fn get_workspace_for_board(&self, board_id: &str) -> Option<&String> {
-        self.board_to_workspace.get(board_id)
-    }
-
     fn get_scope_for_board(&self, board_id: &str) -> (String, String) {
-        let workspace_id = self.board_to_workspace.get(board_id)
+        let workspace_id = self
+            .board_to_workspace
+            .get(board_id)
             .cloned()
             .unwrap_or_else(|| "unknown".to_string());
-        let group_id = self.workspace_to_group.get(&workspace_id)
+        let group_id = self
+            .workspace_to_group
+            .get(&workspace_id)
             .cloned()
             .unwrap_or_else(|| "unknown".to_string());
         (group_id, workspace_id)
@@ -230,6 +299,16 @@ fn gen_id() -> String {
     uuid::Uuid::new_v4().to_string()
 }
 
+/// Build a small JSON object without `serde_json::json!` (whose expansion
+/// unwraps — disallowed here: this bin ships alongside the engine).
+fn content_json(pairs: &[(&str, serde_json::Value)]) -> String {
+    let mut m = serde_json::Map::new();
+    for (k, v) in pairs {
+        m.insert((*k).to_string(), v.clone());
+    }
+    serde_json::Value::Object(m).to_string()
+}
+
 fn convert_network_event(
     event: &NetworkEvent,
     group_id_from_topic: &str,
@@ -245,12 +324,12 @@ fn convert_network_event(
             source: "cyan".to_string(),
             content_kind: "cyan_group".to_string(),
             external_id: g.id.clone(),
-            content: serde_json::json!({
-                "action": "created",
-                "name": g.name,
-                "icon": g.icon,
-                "color": g.color,
-            }).to_string(),
+            content: content_json(&[
+                ("action", "created".into()),
+                ("name", g.name.clone().into()),
+                ("icon", g.icon.clone().into()),
+                ("color", g.color.clone().into()),
+            ]),
             author_id: String::new(),
             author_name: String::new(),
             url: String::new(),
@@ -268,10 +347,7 @@ fn convert_network_event(
             source: "cyan".to_string(),
             content_kind: "cyan_group".to_string(),
             external_id: id.clone(),
-            content: serde_json::json!({
-                "action": "renamed",
-                "name": name,
-            }).to_string(),
+            content: content_json(&[("action", "renamed".into()), ("name", name.clone().into())]),
             author_id: String::new(),
             author_name: String::new(),
             url: String::new(),
@@ -291,10 +367,10 @@ fn convert_network_event(
                 source: "cyan".to_string(),
                 content_kind: "cyan_workspace".to_string(),
                 external_id: ws.id.clone(),
-                content: serde_json::json!({
-                    "action": "created",
-                    "name": ws.name,
-                }).to_string(),
+                content: content_json(&[
+                    ("action", "created".into()),
+                    ("name", ws.name.clone().into()),
+                ]),
                 author_id: String::new(),
                 author_name: String::new(),
                 url: String::new(),
@@ -306,12 +382,18 @@ fn convert_network_event(
             })
         }
 
-        NetworkEvent::BoardCreated { id, workspace_id, name, created_at } => {
+        NetworkEvent::BoardCreated {
+            id,
+            workspace_id,
+            name,
+            created_at,
+        } => {
             tracker.track_board(id, workspace_id);
-            let group_id = tracker.get_group_for_workspace(workspace_id)
+            let group_id = tracker
+                .get_group_for_workspace(workspace_id)
                 .cloned()
                 .unwrap_or_else(|| group_id_from_topic.to_string());
-            
+
             Some(RawEvent {
                 id: gen_id(),
                 group_id,
@@ -319,11 +401,11 @@ fn convert_network_event(
                 source: "cyan_board".to_string(),
                 content_kind: "cyan_board".to_string(),
                 external_id: id.clone(),
-                content: serde_json::json!({
-                    "action": "created",
-                    "name": name,
-                    "board_id": id,
-                }).to_string(),
+                content: content_json(&[
+                    ("action", "created".into()),
+                    ("name", name.clone().into()),
+                    ("board_id", id.clone().into()),
+                ]),
                 author_id: String::new(),
                 author_name: String::new(),
                 url: String::new(),
@@ -335,11 +417,19 @@ fn convert_network_event(
             })
         }
 
-        NetworkEvent::ChatSent { id, workspace_id, message, author, parent_id, timestamp } => {
-            let group_id = tracker.get_group_for_workspace(workspace_id)
+        NetworkEvent::ChatSent {
+            id,
+            workspace_id,
+            message,
+            author,
+            parent_id,
+            timestamp,
+        } => {
+            let group_id = tracker
+                .get_group_for_workspace(workspace_id)
                 .cloned()
                 .unwrap_or_else(|| group_id_from_topic.to_string());
-            
+
             Some(RawEvent {
                 id: gen_id(),
                 group_id,
@@ -359,10 +449,22 @@ fn convert_network_event(
             })
         }
 
-        NetworkEvent::FileAvailable { id, group_id, workspace_id, board_id, name, hash, size, source_peer, created_at } => {
-            let gid = group_id.clone().unwrap_or_else(|| group_id_from_topic.to_string());
+        NetworkEvent::FileAvailable {
+            id,
+            group_id,
+            workspace_id,
+            board_id,
+            name,
+            hash,
+            size,
+            source_peer,
+            created_at,
+        } => {
+            let gid = group_id
+                .clone()
+                .unwrap_or_else(|| group_id_from_topic.to_string());
             let wid = workspace_id.clone().unwrap_or_default();
-            
+
             Some(RawEvent {
                 id: gen_id(),
                 group_id: gid,
@@ -370,13 +472,13 @@ fn convert_network_event(
                 source: "cyan_file".to_string(),
                 content_kind: "cyan_file".to_string(),
                 external_id: id.clone(),
-                content: serde_json::json!({
-                    "filename": name,
-                    "hash": hash,
-                    "size": size,
-                    "board_id": board_id,
-                    "source_peer": source_peer,
-                }).to_string(),
+                content: content_json(&[
+                    ("filename", name.clone().into()),
+                    ("hash", hash.clone().into()),
+                    ("size", (*size).into()),
+                    ("board_id", board_id.clone().into()),
+                    ("source_peer", source_peer.clone().into()),
+                ]),
                 author_id: source_peer.clone(),
                 author_name: source_peer.clone(),
                 url: String::new(),
@@ -388,9 +490,16 @@ fn convert_network_event(
             })
         }
 
-        NetworkEvent::WhiteboardElementAdded { id, board_id, element_type, content_json, created_at, .. } => {
+        NetworkEvent::WhiteboardElementAdded {
+            id,
+            board_id,
+            element_type,
+            content_json: content_json_field,
+            created_at,
+            ..
+        } => {
             let (group_id, workspace_id) = tracker.get_scope_for_board(board_id);
-            
+
             Some(RawEvent {
                 id: gen_id(),
                 group_id,
@@ -398,12 +507,12 @@ fn convert_network_event(
                 source: "cyan_whiteboard".to_string(),
                 content_kind: "cyan_whiteboard_element".to_string(),
                 external_id: id.clone(),
-                content: serde_json::json!({
-                    "action": "added",
-                    "board_id": board_id,
-                    "element_type": element_type,
-                    "content": content_json,
-                }).to_string(),
+                content: content_json(&[
+                    ("action", "added".into()),
+                    ("board_id", board_id.clone().into()),
+                    ("element_type", element_type.clone().into()),
+                    ("content", content_json_field.clone().into()),
+                ]),
                 author_id: String::new(),
                 author_name: String::new(),
                 url: String::new(),
@@ -415,16 +524,28 @@ fn convert_network_event(
             })
         }
 
-        NetworkEvent::NotebookCellAdded { id, board_id, cell_type, content, .. } |
-        NetworkEvent::NotebookCellUpdated { id, board_id, cell_type, content, .. } => {
+        NetworkEvent::NotebookCellAdded {
+            id,
+            board_id,
+            cell_type: _,
+            content,
+            ..
+        }
+        | NetworkEvent::NotebookCellUpdated {
+            id,
+            board_id,
+            cell_type: _,
+            content,
+            ..
+        } => {
             let (group_id, workspace_id) = tracker.get_scope_for_board(board_id);
             let text_content = content.clone().unwrap_or_default();
-            
+
             // Only forward cells with meaningful content
             if text_content.trim().is_empty() {
                 return None;
             }
-            
+
             Some(RawEvent {
                 id: gen_id(),
                 group_id,
@@ -445,26 +566,26 @@ fn convert_network_event(
         }
 
         // Events we don't need to forward to lens (deletes, metadata updates, etc.)
-        NetworkEvent::GroupDeleted { .. } |
-        NetworkEvent::GroupDissolved { .. } |
-        NetworkEvent::WorkspaceDeleted { .. } |
-        NetworkEvent::WorkspaceDissolved { .. } |
-        NetworkEvent::WorkspaceRenamed { .. } |
-        NetworkEvent::BoardDeleted { .. } |
-        NetworkEvent::BoardDissolved { .. } |
-        NetworkEvent::BoardRenamed { .. } |
-        NetworkEvent::ChatDeleted { .. } |
-        NetworkEvent::WhiteboardElementUpdated { .. } |
-        NetworkEvent::WhiteboardElementDeleted { .. } |
-        NetworkEvent::WhiteboardCleared { .. } |
-        NetworkEvent::NotebookCellDeleted { .. } |
-        NetworkEvent::NotebookCellsReordered { .. } |
-        NetworkEvent::BoardModeChanged { .. } |
-        NetworkEvent::BoardMetadataUpdated { .. } |
-        NetworkEvent::BoardLabelsUpdated { .. } |
-        NetworkEvent::BoardRated { .. } |
-        NetworkEvent::ProfileUpdated { .. } |
-        NetworkEvent::GroupSnapshotAvailable { .. } => None,
+        NetworkEvent::GroupDeleted { .. }
+        | NetworkEvent::GroupDissolved { .. }
+        | NetworkEvent::WorkspaceDeleted { .. }
+        | NetworkEvent::WorkspaceDissolved { .. }
+        | NetworkEvent::WorkspaceRenamed { .. }
+        | NetworkEvent::BoardDeleted { .. }
+        | NetworkEvent::BoardDissolved { .. }
+        | NetworkEvent::BoardRenamed { .. }
+        | NetworkEvent::ChatDeleted { .. }
+        | NetworkEvent::WhiteboardElementUpdated { .. }
+        | NetworkEvent::WhiteboardElementDeleted { .. }
+        | NetworkEvent::WhiteboardCleared { .. }
+        | NetworkEvent::NotebookCellDeleted { .. }
+        | NetworkEvent::NotebookCellsReordered { .. }
+        | NetworkEvent::BoardModeChanged { .. }
+        | NetworkEvent::BoardMetadataUpdated { .. }
+        | NetworkEvent::BoardLabelsUpdated { .. }
+        | NetworkEvent::BoardRated { .. }
+        | NetworkEvent::ProfileUpdated { .. }
+        | NetworkEvent::GroupSnapshotAvailable { .. } => None,
     }
 }
 
@@ -504,7 +625,9 @@ impl IggyConnection {
             .build()
             .map_err(|e| format!("Iggy build error: {}", e))?;
 
-        client.connect().await
+        client
+            .connect()
+            .await
             .map_err(|e| format!("Iggy connect error: {}", e))?;
 
         let stream_id = Identifier::named(STREAM_NAME)
@@ -518,21 +641,27 @@ impl IggyConnection {
         let topic_id = Identifier::named(TOPIC_NAME)
             .map_err(|e| format!("Invalid topic identifier: {}", e))?;
 
-        match client.create_topic(
-            &stream_id,
-            TOPIC_NAME,
-            PARTITIONS,
-            CompressionAlgorithm::None,
-            None,
-            None,
-            IggyExpiry::NeverExpire,
-            MaxTopicSize::Unlimited,
-        ).await {
+        match client
+            .create_topic(
+                &stream_id,
+                TOPIC_NAME,
+                PARTITIONS,
+                CompressionAlgorithm::None,
+                None,
+                None,
+                IggyExpiry::NeverExpire,
+                MaxTopicSize::Unlimited,
+            )
+            .await
+        {
             Ok(_) => tracing::info!("Created Iggy topic: {}/{}", STREAM_NAME, TOPIC_NAME),
             Err(e) => tracing::debug!("Topic may already exist: {}", e),
         }
 
-        match client.create_consumer_group(&stream_id, &topic_id, "enricher-workers", None).await {
+        match client
+            .create_consumer_group(&stream_id, &topic_id, "enricher-workers", None)
+            .await
+        {
             Ok(_) => tracing::info!("Created Iggy consumer group: enricher-workers"),
             Err(e) => tracing::debug!("Consumer group may already exist: {}", e),
         }
@@ -556,18 +685,21 @@ impl IggyConnection {
             }
         };
 
-        let payload = serde_json::to_vec(raw_event)
-            .map_err(|e| format!("Serialization error: {}", e))?;
+        let payload =
+            serde_json::to_vec(raw_event).map_err(|e| format!("Serialization error: {}", e))?;
 
-        let stream_id = Identifier::named(STREAM_NAME)
-            .map_err(|e| format!("Invalid stream: {}", e))?;
-        let topic_id = Identifier::named(TOPIC_NAME)
-            .map_err(|e| format!("Invalid topic: {}", e))?;
+        let stream_id =
+            Identifier::named(STREAM_NAME).map_err(|e| format!("Invalid stream: {}", e))?;
+        let topic_id =
+            Identifier::named(TOPIC_NAME).map_err(|e| format!("Invalid topic: {}", e))?;
 
         let partitioning = Partitioning::balanced();
         let mut messages = vec![Message::new(None, payload.into(), None)];
 
-        match client.send_messages(&stream_id, &topic_id, &partitioning, &mut messages).await {
+        match client
+            .send_messages(&stream_id, &topic_id, &partitioning, &mut messages)
+            .await
+        {
             Ok(_) => {
                 self.messages_sent.fetch_add(1, Ordering::Relaxed);
                 self.last_error = None;
@@ -635,7 +767,8 @@ async fn main() -> anyhow::Result<()> {
     let iggy_enabled = env::var("IGGY_ENABLED").map(|v| v != "0").unwrap_or(true);
     // Rendezvous self-publish (SUPER_PEER_COMPLETION_SPEC §5): on start, write a signed config
     // advertising this node so apps discover it instead of hardcoding its node_id. The deploy
-    // uploads/serves RENDEZVOUS_PATH at the well-known URL. Defaults to <db parent>/rendezvous.json.
+    // uploads/serves RENDEZVOUS_PATH at the well-known URL. Defaults to <db
+    // parent>/rendezvous.json.
     let rendezvous_env = env::var("XAEROFLUX_ENV").unwrap_or_else(|_| "dev".to_string());
     let rendezvous_path = env::var("RENDEZVOUS_PATH").unwrap_or_else(|_| {
         std::path::Path::new(&db_path)
@@ -652,10 +785,19 @@ async fn main() -> anyhow::Result<()> {
     println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
     println!("  Discovery Key:  {}", discovery_key);
     println!("  DB Path:        {}", db_path);
-    println!("  Relay URL:      {}", relay_url.as_deref().unwrap_or("(default iroh relays)"));
-    println!("  N0 Discovery:   {}", if no_n0 { "disabled" } else { "enabled" });
+    println!(
+        "  Relay URL:      {}",
+        relay_url.as_deref().unwrap_or("(default iroh relays)")
+    );
+    println!(
+        "  N0 Discovery:   {}",
+        if no_n0 { "disabled" } else { "enabled" }
+    );
     println!("  ───────────────────────────────────────────────────────────────────");
-    println!("  Iggy Enabled:   {}", if iggy_enabled { "yes" } else { "no" });
+    println!(
+        "  Iggy Enabled:   {}",
+        if iggy_enabled { "yes" } else { "no" }
+    );
     println!("  Iggy Address:   {}", iggy_addr);
     println!("  Iggy Topic:     {}/{}", STREAM_NAME, TOPIC_NAME);
     println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
@@ -690,8 +832,14 @@ async fn main() -> anyhow::Result<()> {
     // retune. A failure here must NOT take the bootstrap down; log and keep serving discovery.
     match publish_rendezvous(&xf, &rendezvous_env, relay_url.clone(), &rendezvous_path) {
         Ok(()) => {
-            println!("📡 Published signed rendezvous config → {}", rendezvous_path);
-            println!("   env={} discovery_key={} node_id={}", rendezvous_env, discovery_key, xf.node_id);
+            println!(
+                "📡 Published signed rendezvous config → {}",
+                rendezvous_path
+            );
+            println!(
+                "   env={} discovery_key={} node_id={}",
+                rendezvous_env, discovery_key, xf.node_id
+            );
             println!();
         }
         Err(e) => {
@@ -701,7 +849,10 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    let iggy = Arc::new(RwLock::new(IggyConnection::new(iggy_addr.clone(), iggy_enabled)));
+    let iggy = Arc::new(RwLock::new(IggyConnection::new(
+        iggy_addr.clone(),
+        iggy_enabled,
+    )));
     let tracker = Arc::new(RwLock::new(ScopeTracker::new()));
 
     if iggy_enabled {
@@ -788,12 +939,8 @@ async fn main() -> anyhow::Result<()> {
 
             _ = iggy_retry.tick() => {
                 let mut iggy_guard = iggy.write().await;
-                if iggy_guard.enabled && !iggy_guard.is_connected() {
-                    match iggy_guard.connect().await {
-                        Ok(_) => println!("✅ Reconnected to Iggy"),
-                        Err(_) => {}
-                    }
-                }
+                if iggy_guard.enabled && !iggy_guard.is_connected()
+                    && let Ok(_) = iggy_guard.connect().await { println!("✅ Reconnected to Iggy") }
             }
 
             _ = stats_interval.tick() => {
@@ -805,7 +952,7 @@ async fn main() -> anyhow::Result<()> {
                 println!();
                 println!("📊 Stats:");
                 println!("   Events: {} received, {} converted, {} forwarded", recv, conv, fwd);
-                println!("   Tracked: {} workspaces, {} boards", 
+                println!("   Tracked: {} workspaces, {} boards",
                     tracker_guard.workspace_to_group.len(),
                     tracker_guard.board_to_workspace.len());
                 println!();
