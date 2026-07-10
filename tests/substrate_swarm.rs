@@ -10,20 +10,19 @@
 // assertion is on a node's OWN observed state — its holder registry or its blob store.
 
 // `clippy.toml` sets `allow-unwrap-in-tests = true`, but that allowance does not reach `unwrap()`
-// calls emitted inside macro expansions (e.g. `serde_json::json!`) within an integration-test crate.
-// This is test code where the project already permits unwrap, so allow it at the file level.
+// calls emitted inside macro expansions (e.g. `serde_json::json!`) within an integration-test
+// crate. This is test code where the project already permits unwrap, so allow it at the file level.
 #![allow(clippy::disallowed_methods)]
 
 mod support;
 
-use std::sync::Arc;
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 use bytes::Bytes;
 use futures::StreamExt;
 use iroh_gossip::api::Event as GossipEvent;
-use support::{offline_endpoint, pubkey, topic_id, unique_key, RawGossip, T};
-use xaeroflux::swarm::{BlobSwarm, Hash, BLOB_ALPN};
+use support::{RawGossip, T, offline_endpoint, pubkey, topic_id, unique_key};
+use xaeroflux::swarm::{BLOB_ALPN, BlobSwarm, Hash};
 
 /// Build a `BlobSwarm` over a fresh offline endpoint joined to the mesh's shared `StaticProvider`.
 async fn spawn_swarm(key: &str) -> Arc<BlobSwarm> {
@@ -34,7 +33,8 @@ async fn spawn_swarm(key: &str) -> Arc<BlobSwarm> {
 
 /// Drive a gossip endpoint's receive loop: feed every received message into `swarm.on_message`, and
 /// re-broadcast any reply (an `IHave` answering a `WhoHas`) back onto the same topic. This is the
-/// transport glue — `BlobSwarm` owns the negotiation logic, the existing gossip channel owns delivery.
+/// transport glue — `BlobSwarm` owns the negotiation logic, the existing gossip channel owns
+/// delivery.
 fn pump_gossip(
     swarm: Arc<BlobSwarm>,
     mut rx: iroh_gossip::api::GossipReceiver,
@@ -45,27 +45,28 @@ fn pump_gossip(
             let Ok(GossipEvent::Received(msg)) = item else {
                 continue;
             };
-            if let Ok(Some(reply)) = swarm.on_message(&msg.content).await {
-                if let Ok(bytes) = serde_json::to_vec(&reply) {
-                    let _ = send.broadcast(Bytes::from(bytes)).await;
-                }
+            if let Ok(Some(reply)) = swarm.on_message(&msg.content).await
+                && let Ok(bytes) = serde_json::to_vec(&reply)
+            {
+                let _ = send.broadcast(Bytes::from(bytes)).await;
             }
         }
     });
 }
 
-/// Deterministic blob payload of `len` bytes — large enough that a multi-source download splits work
-/// across providers. No randomness, so the content hash is stable across runs.
+/// Deterministic blob payload of `len` bytes — large enough that a multi-source download splits
+/// work across providers. No randomness, so the content hash is stable across runs.
 fn blob_bytes(len: usize) -> Vec<u8> {
     (0..len).map(|i| (i % 251) as u8).collect()
 }
 
-/// X8 — a provider advertises a blob (IHave), a requester asks (WhoHas), and they negotiate transfer.
+/// X8 — a provider advertises a blob (IHave), a requester asks (WhoHas), and they negotiate
+/// transfer.
 ///
 /// Oracle: the requester's OWN holder registry. The requester broadcasts `WhoHas` over gossip; the
 /// provider (which holds the blob) answers `IHave`; the requester records the provider as a holder.
-/// We assert the requester's registry lists the provider's blob-endpoint id — its own observed state,
-/// never a log line.
+/// We assert the requester's registry lists the provider's blob-endpoint id — its own observed
+/// state, never a log line.
 #[tokio::test]
 async fn blob_ihave_whohas_negotiates() {
     let key = unique_key();
@@ -123,7 +124,8 @@ async fn blob_ihave_whohas_negotiates() {
 ///
 /// Two providers add the SAME bytes; content addressing means they produce the SAME hash. A fresh
 /// requester (which does not hold the blob) fetches it from both holders. Oracle: the requester's
-/// OWN store now holds the blob, and the returned bytes match — fetch Blake3-verifies on completion.
+/// OWN store now holds the blob, and the returned bytes match — fetch Blake3-verifies on
+/// completion.
 #[tokio::test]
 async fn blob_fetched_from_two_providers() {
     let key = unique_key();
@@ -131,8 +133,14 @@ async fn blob_fetched_from_two_providers() {
 
     let provider_a = spawn_swarm(&key).await;
     let provider_b = spawn_swarm(&key).await;
-    let hash_a = provider_a.add(data.clone()).await.expect("provider_a adds blob");
-    let hash_b = provider_b.add(data.clone()).await.expect("provider_b adds blob");
+    let hash_a = provider_a
+        .add(data.clone())
+        .await
+        .expect("provider_a adds blob");
+    let hash_b = provider_b
+        .add(data.clone())
+        .await
+        .expect("provider_b adds blob");
     assert_eq!(
         hash_a, hash_b,
         "content addressing: identical bytes must hash to one identity"
@@ -172,8 +180,9 @@ async fn blob_fetched_from_two_providers() {
 /// X8 (resume) — a holder dropping must not fail the download.
 ///
 /// Two providers hold the blob; one is shut down before the fetch. The `Downloader` falls back to
-/// (and resumes against) the surviving holder, so the download still completes and verifies. Oracle:
-/// the requester's OWN store holds the verified blob despite a dead holder in the provider set.
+/// (and resumes against) the surviving holder, so the download still completes and verifies.
+/// Oracle: the requester's OWN store holds the verified blob despite a dead holder in the provider
+/// set.
 #[tokio::test]
 async fn blob_fetch_resumes_across_holder_churn() {
     let key = unique_key();
@@ -181,7 +190,10 @@ async fn blob_fetch_resumes_across_holder_churn() {
 
     // The holder that will survive.
     let survivor = spawn_swarm(&key).await;
-    let hash = survivor.add(data.clone()).await.expect("survivor adds blob");
+    let hash = survivor
+        .add(data.clone())
+        .await
+        .expect("survivor adds blob");
 
     // The holder that will drop out. Keep its endpoint handle so we can close it (make it
     // undialable) before the fetch — simulating a holder that has left the swarm.

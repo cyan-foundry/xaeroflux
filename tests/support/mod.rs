@@ -2,8 +2,8 @@
 //
 // Discipline (see XAEROFLUX_TEST_SPEC.md / CLAUDE.md):
 // - Offline only: every node uses `no_n0_discovery()` + `no_mdns()` + `disable_relay()` and a
-//   shared in-process `StaticProvider` for out-of-band loopback addressing. No public relay, no
-//   n0 DNS, no mDNS multicast — a test that needs the internet is a bug.
+//   shared in-process `StaticProvider` for out-of-band loopback addressing. No public relay, no n0
+//   DNS, no mDNS multicast — a test that needs the internet is a bug.
 // - Per-node identity + storage: each node gets its own unique temp dir, so each gets its own
 //   `node.key` (identity is persisted next to `db_path`) and its own SQLite DB.
 // - Bounded waits only: `wait_for_event` is always a `tokio::time::timeout` with a clear failure.
@@ -14,21 +14,25 @@
 
 #![allow(dead_code)] // harness helpers are used across multiple test files; not all in every file
 
-use std::collections::HashMap;
-use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Mutex, OnceLock};
-use std::time::Duration;
+use std::{
+    collections::HashMap,
+    path::PathBuf,
+    sync::{
+        Mutex, OnceLock,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::Duration,
+};
 
-use anyhow::{anyhow, Result};
-use iroh::discovery::static_provider::StaticProvider;
-use iroh::protocol::Router;
-use iroh::{Endpoint, PublicKey};
-use iroh_gossip::api::{GossipReceiver, GossipSender};
-use iroh_gossip::proto::TopicId;
-use iroh_gossip::Gossip;
+use anyhow::{Result, anyhow};
+use iroh::{Endpoint, PublicKey, discovery::static_provider::StaticProvider, protocol::Router};
+use iroh_gossip::{
+    Gossip,
+    api::{GossipReceiver, GossipSender},
+    proto::TopicId,
+};
 use tokio::sync::mpsc::UnboundedReceiver;
-use xaeroflux::{generate_event_id, Event, XaeroFlux};
+use xaeroflux::{Event, XaeroFlux, generate_event_id};
 
 /// Bounded wait budget for convergence assertions.
 pub const T: Duration = Duration::from_secs(15);
@@ -46,8 +50,8 @@ pub fn unique_key() -> String {
 
 /// Process-wide registry of one shared `StaticProvider` per discovery key. All nodes in a mesh
 /// share the same discovery key (and thus the same provider), so each node can resolve every other
-/// node in its own mesh — and nodes in a different mesh (different key) use a different provider, so
-/// concurrent meshes do not cross-wire.
+/// node in its own mesh — and nodes in a different mesh (different key) use a different provider,
+/// so concurrent meshes do not cross-wire.
 fn provider_for(key: &str) -> StaticProvider {
     static REG: OnceLock<Mutex<HashMap<String, StaticProvider>>> = OnceLock::new();
     let reg = REG.get_or_init(|| Mutex::new(HashMap::new()));
@@ -55,8 +59,8 @@ fn provider_for(key: &str) -> StaticProvider {
     map.entry(key.to_string()).or_default().clone()
 }
 
-/// Resolve this node's dialable `EndpointAddr` (id + direct loopback/LAN addresses), waiting briefly
-/// for the local-interface addresses to populate after bind. Bounded; never blocks forever.
+/// Resolve this node's dialable `EndpointAddr` (id + direct loopback/LAN addresses), waiting
+/// briefly for the local-interface addresses to populate after bind. Bounded; never blocks forever.
 async fn dialable_addr(endpoint: &Endpoint) -> Result<iroh::EndpointAddr> {
     for _ in 0..100 {
         let addr = endpoint.addr();
@@ -155,7 +159,9 @@ pub fn group_topic(gid: &str) -> TopicId {
 
 /// Parse a node_id string into an iroh `PublicKey` (the engine's `EndpointId`).
 pub fn pubkey(node_id: &str) -> PublicKey {
-    node_id.parse().expect("node_id should parse as a PublicKey")
+    node_id
+        .parse()
+        .expect("node_id should parse as a PublicKey")
 }
 
 /// A raw, offline iroh-gossip peer — used to inject discovery-topic control messages
@@ -251,7 +257,10 @@ where
             match rx.recv().await {
                 Some(ev) if pred(&ev) => return Ok(ev),
                 Some(_) => continue,
-                None => return Err(anyhow!("event channel closed before a matching event arrived")),
+                None =>
+                    return Err(anyhow!(
+                        "event channel closed before a matching event arrived"
+                    )),
             }
         }
     };

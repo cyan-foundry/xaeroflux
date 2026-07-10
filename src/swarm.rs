@@ -4,14 +4,17 @@
 //
 // Today the substrate moves data two ways: deltas via gossip and a full GroupSnapshot via direct
 // QUIC (see `snapshot.rs`). Neither distributes *files*: plugin bundles (`.cyanplugin`) and large
-// media need a content-addressed, multi-source swarm so a group can pull a blob from whichever peers
-// hold it, in parallel, surviving holder churn. This module wires `iroh-blobs` 0.97 to provide that.
+// media need a content-addressed, multi-source swarm so a group can pull a blob from whichever
+// peers hold it, in parallel, surviving holder churn. This module wires `iroh-blobs` 0.97 to
+// provide that.
 //
 // Design (mirrors the standalone-primitive shape of `SnapshotProvider`/`SnapshotRequester`):
 // - `BlobSwarm` owns an in-memory `iroh-blobs` store and mounts the blobs protocol on the blobs
-//   ALPN over a caller-supplied iroh endpoint (its own `Router`). Any node can both serve and fetch.
-// - Content addressing is Blake3: `iroh-blobs` identifies a blob by its Blake3 hash, so the hash *is*
-//   the identity. `add` returns that hash; `fetch` verifies it on completion before surfacing bytes.
+//   ALPN over a caller-supplied iroh endpoint (its own `Router`). Any node can both serve and
+//   fetch.
+// - Content addressing is Blake3: `iroh-blobs` identifies a blob by its Blake3 hash, so the hash
+//   *is* the identity. `add` returns that hash; `fetch` verifies it on completion before surfacing
+//   bytes.
 // - i-have / who-has negotiation is transport-agnostic: `BlobSwarm` produces and consumes
 //   `SwarmMessage`s and maintains a holder registry, but does not own a gossip topic. Callers ride
 //   the *existing* gossip channel (the engine's discovery/group topics) to carry these messages —
@@ -19,19 +22,21 @@
 // - Multi-source fetch + resume use `iroh-blobs`' `Downloader`, which tries holders in turn,
 //   resuming from already-received chunks when a holder drops mid-transfer.
 //
-// This is additive and behavior-preserving for the `xaeroflux_bootstrap` binary: the binary does not
-// construct a `BlobSwarm`, and nothing here changes the `NetworkActor`'s endpoint, gossip, or Router.
+// This is additive and behavior-preserving for the `xaeroflux_bootstrap` binary: the binary does
+// not construct a `BlobSwarm`, and nothing here changes the `NetworkActor`'s endpoint, gossip, or
+// Router.
 
-use std::collections::{HashMap, HashSet};
-use std::str::FromStr;
-use std::sync::Arc;
-use std::time::Duration;
+use std::{
+    collections::{HashMap, HashSet},
+    str::FromStr,
+    sync::Arc,
+    time::Duration,
+};
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use bytes::Bytes;
-use iroh::{protocol::Router, Endpoint, PublicKey};
-use iroh_blobs::store::mem::MemStore;
-use iroh_blobs::BlobsProtocol;
+use iroh::{Endpoint, PublicKey, protocol::Router};
+use iroh_blobs::{BlobsProtocol, store::mem::MemStore};
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 
@@ -43,9 +48,9 @@ pub const BLOB_ALPN: &[u8] = iroh_blobs::ALPN;
 /// downstream crates can name it without a direct `iroh-blobs` dependency.
 pub use iroh_blobs::Hash;
 
-/// Per-holder dial cap during a multi-source fetch. A departed holder's address lingers in discovery,
-/// so an unbounded `connect` would retry it until QUIC's own long timeout; this bounds each attempt
-/// so the fetch falls through to a live holder promptly.
+/// Per-holder dial cap during a multi-source fetch. A departed holder's address lingers in
+/// discovery, so an unbounded `connect` would retry it until QUIC's own long timeout; this bounds
+/// each attempt so the fetch falls through to a live holder promptly.
 const DIAL_TIMEOUT: Duration = Duration::from_secs(5);
 
 // ============================================================================
@@ -59,10 +64,16 @@ const DIAL_TIMEOUT: Duration = Duration::from_secs(5);
 #[serde(tag = "type")]
 pub enum SwarmMessage {
     /// "I have this blob" — `holder_node_id` holds the blob with this hash and will serve it.
-    IHave { hash: String, holder_node_id: String },
+    IHave {
+        hash: String,
+        holder_node_id: String,
+    },
 
     /// "Who has this blob?" — `requester_node_id` is looking for holders of this hash.
-    WhoHas { hash: String, requester_node_id: String },
+    WhoHas {
+        hash: String,
+        requester_node_id: String,
+    },
 }
 
 // ============================================================================
@@ -152,8 +163,9 @@ impl BlobSwarm {
         }
     }
 
-    /// Record that `holder` holds the blob identified by `hash_hex` (a holder this node observed via
-    /// an `IHave`). Self-announcements are ignored so a node never lists itself as a remote holder.
+    /// Record that `holder` holds the blob identified by `hash_hex` (a holder this node observed
+    /// via an `IHave`). Self-announcements are ignored so a node never lists itself as a remote
+    /// holder.
     pub async fn record_holder(&self, hash_hex: &str, holder: &str) {
         if holder == self.node_id {
             return;
@@ -176,14 +188,18 @@ impl BlobSwarm {
 
     /// Process one incoming negotiation message (received over gossip):
     /// - `IHave`  → record the holder; nothing to send back.
-    /// - `WhoHas` → if this node holds the blob, return an `IHave` reply for the caller to broadcast.
+    /// - `WhoHas` → if this node holds the blob, return an `IHave` reply for the caller to
+    ///   broadcast.
     ///
     /// Pure negotiation logic over a serialized message; the caller owns the gossip transport.
     pub async fn on_message(&self, raw: &[u8]) -> Result<Option<SwarmMessage>> {
-        let msg: SwarmMessage = serde_json::from_slice(raw)
-            .map_err(|e| anyhow!("malformed swarm message: {e}"))?;
+        let msg: SwarmMessage =
+            serde_json::from_slice(raw).map_err(|e| anyhow!("malformed swarm message: {e}"))?;
         match msg {
-            SwarmMessage::IHave { hash, holder_node_id } => {
+            SwarmMessage::IHave {
+                hash,
+                holder_node_id,
+            } => {
                 self.record_holder(&hash, &holder_node_id).await;
                 Ok(None)
             }
@@ -205,10 +221,11 @@ impl BlobSwarm {
     /// holder churn, then verify its Blake3 hash before returning the bytes.
     ///
     /// `iroh-blobs` does Blake3-verified streaming and writes verified chunks to the store as they
-    /// arrive, tracking which ranges are present. So a fetch against a holder only pulls the *missing*
-    /// ranges: if one holder drops mid-transfer (or is already gone when we dial it), we fall through
-    /// to the next holder and it resumes from where the previous left off. A single holder leaving
-    /// therefore never fails the download as long as some holder in the set can serve the rest.
+    /// arrive, tracking which ranges are present. So a fetch against a holder only pulls the
+    /// *missing* ranges: if one holder drops mid-transfer (or is already gone when we dial it),
+    /// we fall through to the next holder and it resumes from where the previous left off. A
+    /// single holder leaving therefore never fails the download as long as some holder in the
+    /// set can serve the rest.
     ///
     /// On completion we recompute the Blake3 hash of the assembled bytes and reject any mismatch
     /// (defence-in-depth on top of verified streaming) before surfacing the blob.
@@ -233,8 +250,9 @@ impl BlobSwarm {
                 break;
             }
             // Bounded dial: a holder that has left the swarm is no longer reachable, and a raw
-            // `connect` would retry its stale address until QUIC's own (long) timeout. Cap each dial
-            // so churn falls through to the next holder quickly instead of stalling the fetch.
+            // `connect` would retry its stale address until QUIC's own (long) timeout. Cap each
+            // dial so churn falls through to the next holder quickly instead of
+            // stalling the fetch.
             let conn = match tokio::time::timeout(
                 DIAL_TIMEOUT,
                 self.endpoint.connect(*provider, BLOB_ALPN),
@@ -247,7 +265,9 @@ impl BlobSwarm {
                     continue;
                 }
                 Err(_) => {
-                    last_err = Some(anyhow!("dial holder {provider} timed out (likely departed)"));
+                    last_err = Some(anyhow!(
+                        "dial holder {provider} timed out (likely departed)"
+                    ));
                     continue;
                 }
             };
@@ -259,8 +279,9 @@ impl BlobSwarm {
         }
 
         if !self.has(hash).await? {
-            return Err(last_err
-                .unwrap_or_else(|| anyhow!("no holder in the set could serve {hash}")));
+            return Err(
+                last_err.unwrap_or_else(|| anyhow!("no holder in the set could serve {hash}"))
+            );
         }
 
         // Integrity gate: surface the blob only if the assembled content's Blake3 hash matches.

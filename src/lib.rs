@@ -20,22 +20,22 @@ use anyhow::Result;
 use bytes::Bytes;
 use futures::StreamExt;
 use iroh::{
+    Endpoint, PublicKey, RelayMap, RelayMode, RelayUrl, SecretKey,
     discovery::{
         dns::DnsDiscovery, mdns::MdnsDiscovery, pkarr::PkarrPublisher,
         static_provider::StaticProvider,
     },
     protocol::Router,
-    Endpoint, PublicKey, RelayMap, RelayMode, RelayUrl, SecretKey,
 };
 use iroh_gossip::{
+    Gossip,
     api::{Event as GossipEvent, GossipReceiver, GossipSender},
     proto::TopicId,
-    Gossip,
 };
 use rand_chacha::rand_core::SeedableRng;
-use rusqlite::{params, Connection};
+use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
-use tokio::sync::{mpsc, Mutex, RwLock};
+use tokio::sync::{Mutex, RwLock, mpsc};
 
 // ---------- Core Event Type ----------
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -163,7 +163,8 @@ pub struct XaeroFlux {
     pub endpoint: Endpoint,
     /// This node's secret key, retained so it can sign a self-published rendezvous config
     /// (see [`XaeroFlux::signed_rendezvous_config`]). Private — never exposed to callers; the
-    /// only thing it can do from outside is sign the rendezvous config the node already advertises.
+    /// only thing it can do from outside is sign the rendezvous config the node already
+    /// advertises.
     secret_key: SecretKey,
 }
 
@@ -249,7 +250,7 @@ impl XaeroFlux {
             network_event_rx,
             sync_event_tx,
         )
-            .await?;
+        .await?;
         let endpoint = network_actor.endpoint.clone();
         tokio::spawn(network_actor.run());
 
@@ -359,7 +360,7 @@ impl StorageActor {
                 "INSERT OR IGNORE INTO events (id, payload, source, ts) VALUES (?1, ?2, ?3, ?4)",
                 params![event.id, event.payload, event.source, event.ts],
             ) {
-                Ok(rows) => {
+                Ok(rows) =>
                     if rows > 0 {
                         tracing::info!("Event {} stored", event.id);
                         drop(db);
@@ -369,8 +370,7 @@ impl StorageActor {
                         }
                     } else {
                         tracing::debug!("Event {} already exists (duplicate)", event.id);
-                    }
-                }
+                    },
                 Err(e) => {
                     tracing::error!("Failed to store event {}: {}", event.id, e);
                 }
@@ -399,7 +399,8 @@ impl PeerTracker {
         // Collect from DB first (don't hold stmt across await)
         let rows: Vec<(String, String)> = {
             let db = self.db.lock().await;
-            let mut stmt = db.prepare("SELECT group_id, peer_id FROM group_peers WHERE is_online = 1")?;
+            let mut stmt =
+                db.prepare("SELECT group_id, peer_id FROM group_peers WHERE is_online = 1")?;
             let mapped = stmt.query_map([], |row| {
                 Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
             })?;
@@ -411,10 +412,7 @@ impl PeerTracker {
         cache.clear();
 
         for (group_id, peer_id) in rows {
-            cache
-                .entry(group_id)
-                .or_insert_with(Vec::new)
-                .push(peer_id);
+            cache.entry(group_id).or_insert_with(Vec::new).push(peer_id);
         }
 
         Ok(())
@@ -472,8 +470,8 @@ impl PeerTracker {
             let db = self.db.lock().await;
 
             // Collect affected groups first
-            let mut stmt =
-                db.prepare("SELECT group_id FROM group_peers WHERE peer_id = ?1 AND is_online = 1")?;
+            let mut stmt = db
+                .prepare("SELECT group_id FROM group_peers WHERE peer_id = ?1 AND is_online = 1")?;
             let rows = stmt.query_map(params![peer_id], |row| row.get::<_, String>(0))?;
             affected_groups = rows.collect::<Result<Vec<_>, _>>()?;
 
@@ -537,6 +535,7 @@ struct NetworkActor {
     db: Arc<Mutex<Connection>>,
     #[allow(dead_code)]
     endpoint: Endpoint,
+    #[allow(dead_code)]
     gossip: Arc<Gossip>,
     #[allow(dead_code)]
     router: Router,
@@ -545,7 +544,32 @@ struct NetworkActor {
     outbound_rx: mpsc::UnboundedReceiver<Event>,
     inbound_tx: mpsc::UnboundedSender<Event>,
     peer_tracker: Arc<PeerTracker>,
+    #[allow(dead_code)]
     discovery_key: String,
+}
+
+/// Build the discovery-topic `peer_introduction` payload without `json!`
+/// (whose expansion unwraps — disallowed in the engine).
+fn peer_introduction_json(group_id: &str, peers: &[String]) -> String {
+    let mut m = serde_json::Map::new();
+    m.insert(
+        "msg_type".to_string(),
+        serde_json::Value::String("peer_introduction".to_string()),
+    );
+    m.insert(
+        "group_id".to_string(),
+        serde_json::Value::String(group_id.to_string()),
+    );
+    m.insert(
+        "peers".to_string(),
+        serde_json::Value::Array(
+            peers
+                .iter()
+                .map(|p| serde_json::Value::String(p.clone()))
+                .collect(),
+        ),
+    );
+    serde_json::Value::Object(m).to_string()
 }
 
 impl NetworkActor {
@@ -639,9 +663,7 @@ impl NetworkActor {
             .await?;
 
         // Join discovery topic
-        let mut discovery_topic = gossip
-            .subscribe(discovery_topic_id, bootstrap_ids)
-            .await?;
+        let mut discovery_topic = gossip.subscribe(discovery_topic_id, bootstrap_ids).await?;
 
         tokio::time::sleep(Duration::from_millis(500)).await;
         tokio::time::timeout(Duration::from_secs(2), events_topic.joined())
@@ -666,8 +688,8 @@ impl NetworkActor {
         let peer_tracker_clone = peer_tracker.clone();
         let discovery_key_clone = config.discovery_key.clone();
         let endpoint_id_clone = endpoint_id;
-        let gossip_clone = gossip.clone();  // For dynamic group topic subscription
-        let inbound_tx_clone = inbound_tx.clone();  // For forwarding group events
+        let gossip_clone = gossip.clone(); // For dynamic group topic subscription
+        let inbound_tx_clone = inbound_tx.clone(); // For forwarding group events
 
         tokio::spawn(async move {
             tracing::info!("Peer discovery task started");
@@ -677,8 +699,10 @@ impl NetworkActor {
 
             // Track which group topics we've subscribed to (for relaying)
             // Store the senders so we can add peers via join_peers
-            let mut group_topic_senders: std::collections::HashMap<String, iroh_gossip::api::GossipSender> =
-                std::collections::HashMap::new();
+            let mut group_topic_senders: std::collections::HashMap<
+                String,
+                iroh_gossip::api::GossipSender,
+            > = std::collections::HashMap::new();
 
             loop {
                 tokio::select! {
@@ -694,14 +718,10 @@ impl NetworkActor {
                         for group_id in groups {
                             let peers = peer_tracker_clone.get_peers(&group_id).await;
                             if peers.len() > 1 {
-                                let intro_msg = serde_json::json!({
-                                    "msg_type": "peer_introduction",
-                                    "group_id": group_id,
-                                    "peers": peers,
-                                });
+                                let intro_msg = peer_introduction_json(&group_id, &peers);
 
                                 let _ = discovery_topic.broadcast(
-                                    Bytes::from(intro_msg.to_string())
+                                    Bytes::from(intro_msg)
                                 ).await;
 
                                 tracing::debug!(
@@ -726,9 +746,9 @@ impl NetworkActor {
                     Some(event_result) = discovery_topic.next() => {
                         match event_result {
                             Ok(GossipEvent::Received(msg)) => {
-                                if let Ok(json) = serde_json::from_slice::<serde_json::Value>(&msg.content) {
-                                    if let Some(msg_type) = json.get("msg_type").and_then(|v| v.as_str()) {
-                                        if msg_type == "groups_exchange" {
+                                if let Ok(json) = serde_json::from_slice::<serde_json::Value>(&msg.content)
+                                    && let Some(msg_type) = json.get("msg_type").and_then(|v| v.as_str())
+                                        && msg_type == "groups_exchange" {
                                             // Use node_id from JSON payload (not delivered_from which may be relay)
                                             let from_node = match json.get("node_id").and_then(|v| v.as_str()) {
                                                 Some(id) => id,
@@ -811,20 +831,20 @@ impl NetworkActor {
                                                                                     .duration_since(std::time::UNIX_EPOCH)
                                                                                     .map(|d| d.as_secs())
                                                                                     .unwrap_or(0);
-                                                                                
+
                                                                                 let evt = Event {
                                                                                     id: blake3::hash(&content).to_hex().to_string(),
                                                                                     payload: String::from_utf8_lossy(&content).to_string(),
                                                                                     source: format!("group/{}", gid_clone),
                                                                                     ts,
                                                                                 };
-                                                                                
+
                                                                                 tracing::info!(
                                                                                     "📨 [GROUP {}] Forwarding event: {}",
                                                                                     &gid_clone[..16.min(gid_clone.len())],
                                                                                     &evt.id[..16]
                                                                                 );
-                                                                                
+
                                                                                 if let Err(e) = inbound_tx_for_group.send(evt) {
                                                                                     tracing::error!(
                                                                                         "Failed to forward group event: {}",
@@ -904,11 +924,7 @@ impl NetworkActor {
 
                                             // Broadcast peer introductions
                                             for (group_id, peers) in introductions {
-                                                let intro_msg = serde_json::json!({
-                                                    "msg_type": "peer_introduction",
-                                                    "group_id": group_id,
-                                                    "peers": peers,
-                                                });
+                                                let intro_msg = peer_introduction_json(&group_id, &peers);
 
                                                 tracing::info!(
                                                     "📢 Broadcasting peer_introduction for {} ({} peers)",
@@ -917,12 +933,10 @@ impl NetworkActor {
                                                 );
 
                                                 let _ = discovery_topic.broadcast(
-                                                    Bytes::from(intro_msg.to_string())
+                                                    Bytes::from(intro_msg)
                                                 ).await;
                                             }
                                         }
-                                    }
-                                }
                             }
 
                             Ok(GossipEvent::NeighborUp(peer)) => {
@@ -938,11 +952,7 @@ impl NetworkActor {
                                         for group_id in affected_groups {
                                             let peers = peer_tracker_clone.get_peers(&group_id).await;
                                             if peers.len() > 1 {
-                                                let intro_msg = serde_json::json!({
-                                                    "msg_type": "peer_introduction",
-                                                    "group_id": group_id,
-                                                    "peers": peers,
-                                                });
+                                                let intro_msg = peer_introduction_json(&group_id, &peers);
 
                                                 tracing::info!(
                                                     "📢 Re-broadcast peer_introduction for {} (peer left)",
@@ -950,7 +960,7 @@ impl NetworkActor {
                                                 );
 
                                                 let _ = discovery_topic.broadcast(
-                                                    Bytes::from(intro_msg.to_string())
+                                                    Bytes::from(intro_msg)
                                                 ).await;
                                             }
                                         }
@@ -967,7 +977,10 @@ impl NetworkActor {
                 }
             }
 
-            tracing::info!("Peer discovery task for '{}' terminated", discovery_key_clone);
+            tracing::info!(
+                "Peer discovery task for '{}' terminated",
+                discovery_key_clone
+            );
         });
 
         Ok(Self {
@@ -1112,6 +1125,7 @@ mod tests {
             .expect("failed to create XaeroFlux with custom relay");
         assert!(!xf.node_id.is_empty());
     }
-}pub mod rendezvous;
+}
+pub mod rendezvous;
 pub mod snapshot;
 pub mod swarm;
